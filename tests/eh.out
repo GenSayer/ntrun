@@ -1,0 +1,33 @@
+ctor middle
+ctor thrower
+dtor thrower
+middle returns
+dtor middle
+ctor middle
+ctor thrower
+dtor thrower
+dtor middle
+int 42
+ctor middle
+ctor thrower
+dtor thrower
+dtor middle
+class Derived
+ctor middle
+ctor thrower
+dtor thrower
+dtor middle
+str text
+ctor middle
+ctor thrower
+dtor thrower
+dtor middle
+other
+ctor middle
+ctor thrower
+dtor thrower
+dtor middle
+rethrow 42
+caught again 42
+nested 2
+done

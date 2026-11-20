@@ -1,0 +1,36 @@
+1 arguments [one] ["two words"] [three]
+2 variable value and 100%
+3 if ==
+4 if not
+5 if exist
+6 if not exist
+text
+more
+text
+more
+text
+more
+7 for t1.tmp
+7 for t2.tmp
+8 pattern t1.tmp
+8 pattern t2.tmp
+8 pattern t3.tmp
+9 group
+9 after
+10 goto
+11 shift ["two words"]
+12 one
+12 two
+13 or
+14 and
+15 md
+16 ren
+17 copy to a folder
+18 rd
+19 del
+20 errorlevel 1
+21 not errorlevel 2
+22 set to nothing
+23 a caret & and "a quoted & sign"
+
+24 done

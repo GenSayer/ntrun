@@ -1,0 +1,7 @@
+7ff0000000000000 1 too big: plus infinity
+0000000000000000 2 too small: 0
+7ff0000000000000 3 divide by zero: plus infinity
+fff8000000000000 4 zero by zero: not a number
+5 to integer: 0
+fff0000000000000 6 infinity less infinity: minus infinity
+done

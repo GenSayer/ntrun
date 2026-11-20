@@ -1,0 +1,4 @@
+lib 5 dll 42
+string: a string resource
+message: Hello from the message table, ntrun.
+message: Count 3 of 4.

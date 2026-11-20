@@ -1,0 +1,7 @@
+1 too big: exception c0000091
+2 too small: exception c0000090
+3 divide by zero: exception c000008e
+4 zero by zero: exception c0000090
+5 to integer: exception c0000090
+0000000000000000 6 infinity less infinity: 0
+done

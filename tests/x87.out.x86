@@ -1,0 +1,47 @@
+fld1        4 cases b91302dd
+fldl2t      4 cases b728ee64
+fldl2e      4 cases 9133a725
+fldpi       4 cases 7e571665
+fldlg2      4 cases c9bd0be5
+fldln2      4 cases 2092abe5
+fldz        4 cases c655ff85
+fadd      480 cases 2ac84dcc
+fsub      480 cases 7befea54
+fmul      480 cases ee6779ff
+fdiv      480 cases f3ffbdd3
+fprem     160 cases b3f67f10
+fprem1    160 cases 232db897
+fscale    160 cases dcf92d1e
+fpatan    160 cases ed212853
+fyl2x     160 cases b6ab6ff0
+fyl2xp1   160 cases 569d12f0
+fcom      480 cases a3afe5ae
+fucom     480 cases e6507a12
+fsqrt     480 cases 53be5098
+frndint   160 cases 2c416234
+f2xm1     160 cases 7d18f559
+fxtract   160 cases 334c7cdf
+fabs      160 cases 9d396b1f
+fchs      160 cases 0b379f9d
+fxam      160 cases 6668683d
+ftst      160 cases 3c005167
+fst64     480 cases aad9d657
+fst32     480 cases f22e780e
+fist16    480 cases 21f4eaf4
+fist32    480 cases 005b3264
+fist64    480 cases 085c4c98
+fbstp     480 cases 4e830f10
+fld64     160 cases bdf34862
+fld32     160 cases e44de281
+fild64    160 cases faee7103
+fbld      160 cases eac30d6d
+fiadd32   160 cases ee951826
+fmul64    160 cases 9046cef6
+divide by zero         exception c000008e
+zero by zero           exception c0000090
+too big in a store     exception c0000091
+too small in a store   exception c0000093
+not exact              exception c000008f
+too big in a register  exception c0000091
+all masked             exception 00000000
+square root of -1      exception c0000090

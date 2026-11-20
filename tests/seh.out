@@ -1,0 +1,13 @@
+1 longjmp 7
+2 except e0001234
+3 finally 1
+4 access violation: kind 0, address 00000000
+5 write fault: kind 1, address 00000010
+6 continued
+7 inner finally, abnormal 1
+7 outer except
+8 parameter 22
+9 return 1 finally 11
+10 outer got it
+11 except c0000094
+done

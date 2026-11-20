@@ -1,0 +1,6 @@
+#include "msg.rc"
+
+STRINGTABLE
+BEGIN
+    100, "a string resource"
+END

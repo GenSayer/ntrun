@@ -1,0 +1,14 @@
+1 wait for all ok, counter 4000
+2 thread 0 exit code 100
+2 thread 1 exit code 101
+2 thread 2 exit code 102
+2 thread 3 exit code 103
+3 wait with a time limit 258, exit code 259
+4 thread data 8 9, first thread 7
+5 suspended: counter 0
+6 resumed (1): counter 1000, exit code 109
+7 the mutex keeps the thread out: counter 0
+8 semaphore 0, counter 10
+9 semaphore again 258
+10 _beginthread: counter 15
+done

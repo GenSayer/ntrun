@@ -1,0 +1,4 @@
+static: 42 "thread data" 0
+TlsAlloc ok
+TlsGetValue 1234
+TlsFree 1
