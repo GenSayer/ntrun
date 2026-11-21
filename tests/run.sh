@@ -7,6 +7,8 @@
 # (https://github.com/tenox7/ntsdk). The default is /opt, the folder in that image.
 #   nt40/CPU/msdev   bin, include, lib and redist of Visual C++ 4.x for mips, alpha, ppc and x86
 #   sys/CPU          CRTDLL.DLL of Windows NT for that CPU
+#   nt50/axp64       the tools for 64-bit Alpha (CPU axp64): 32-bit Alpha programs. ntrun cannot
+#                    run what they make, so the test reads the headers of the files they make.
 # TOOLS can be the folder tools of the ntsdk repository: x86 is then ../nt40sdk/msdev.
 # NTRUN is the ntrun to test (default: the one in the folder above this one).
 # KEEP=1 keeps the work folder. The work folder is $WORK (default: /tmp/ntrun-tests).
@@ -17,7 +19,7 @@ tools=${1:-/opt}
 [ -d "$tools/nt40" ] || { echo "usage: run.sh [TOOLS [mips alpha ppc x86]]" >&2; exit 2; }
 tools=$(cd "$tools" && pwd)
 [ $# -eq 0 ] || shift
-[ $# -gt 0 ] || set -- mips alpha ppc x86
+[ $# -gt 0 ] || set -- mips alpha ppc x86 axp64
 work=${WORK:-/tmp/ntrun-tests}
 fail=0
 total=0
@@ -57,6 +59,30 @@ for cpu in "$@"; do
     mkdir -p "$d"
     cp "$here"/*.c "$here"/*.cpp "$here"/*.rc "$here"/*.mak "$here"/*.def "$here"/*.mc "$here"/*.h "$d"/ 2>/dev/null
     cd "$d" || exit 1
+    if [ "$cpu" = axp64 ]; then
+        a=$tools/nt50/axp64
+        if [ ! -d "$a" ]; then
+            echo "  left out: $tools has no nt50/axp64"
+            continue
+        fi
+        # C++ with exceptions, then mc, rc, lib, a DLL and a program, all for 64-bit Alpha (-Ap64)
+        NTRUN_DRIVE_C=$a
+        NTRUN_PATH='C:\mssdk\bin\win64;C:\mssdk\bin;C:\vc98\bin'
+        INCLUDE='C:\mssdk\include;C:\mssdk\include\win64\crt'
+        LIB='C:\mssdk\lib\win64;C:\mssdk\lib\win64\crt'
+        NTRUN_DLLPATH=$a/vc98/redist:$tools/sys/alpha
+        TMP="$(win "$d")"
+        CL=-Ap64
+        export NTRUN_DRIVE_C NTRUN_PATH INCLUDE LIB NTRUN_DLLPATH TMP CL
+        $ntrun cl -nologo -GX eh.cpp > eh.build 2>&1
+        $ntrun nmake -nologo -f tools.mak > tools.build 2>&1
+        for f in eh.exe app.exe mydll.dll; do
+            $ntrun link -dump -headers $f 2>&1 | tr -d '\r' | sed -n "s/^ *\\(.*machine (.*\\)$/$f: \\1/p; s/^ *\\(.*magic #.*\\)$/$f: \\1/p"
+        done > axp64.txt
+        unset NTRUN_DRIVE_C CL
+        check axp64 $cpu
+        continue
+    fi
     v=$tools/nt40/$cpu/msdev
     [ -d "$v" ] || v=$tools/../nt40sdk/msdev
     INCLUDE="$(win "$v/include")"

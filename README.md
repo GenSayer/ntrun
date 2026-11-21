@@ -8,13 +8,16 @@ and run the console programs that these tools build.
 The Docker image [ntsdk](https://github.com/tenox7/ntsdk) has ntrun with these tools for
 Windows NT 3.1, 3.5 and 4.0 and the four CPUs.
 
+ntrun runs 32-bit programs only. The tools that make programs for 64-bit Alpha (AXP64) are
+32-bit Alpha programs, so they run. The programs that they make do not run.
+
 ## How it works
 
 - A CPU interpreter runs the code of the program (`cpu_mips.c`, `cpu_alpha.c`, `cpu_ppc.c`, `cpu_x86.c`).
   x86 is the 80486 instruction set with the x87 and the CMOV instructions. The x87 is done with
   integer arithmetic only (80-bit registers, each precision and rounding mode, exceptions),
   so each host gives the same bits.
-- The Windows functions (KERNEL32, and some of NTDLL, USER32, ADVAPI32, RPCRT4, IMAGEHLP) run on the host (`ntrun.c`).
+- The Windows functions (KERNEL32, and some of NTDLL, USER32, ADVAPI32, RPCRT4, IMAGEHLP, OLE32) run on the host (`ntrun.c`).
 - DLLs that are not part of Windows (MSVCRT40.DLL, MSPDB41.DLL, CRTDLL.DLL ...) are loaded from files
   and run in the interpreter too.
 - Windows exceptions work as on Windows NT (`seh.c`): function tables and unwind on the RISC CPUs,
@@ -101,7 +104,7 @@ Copy them from the `system32` folder of a Windows NT system, or from its CD
 
 ## Tests
 
-    tests/run.sh [TOOLS [mips alpha ppc x86]]
+    tests/run.sh [TOOLS [mips alpha ppc x86 axp64]]
     make test TOOLS=/folder/with/the/tool/sets
 
 TOOLS is a folder with Visual C++ 4.x for each CPU, in the layout of the ntsdk image
@@ -117,6 +120,8 @@ Builds the test programs with Visual C++ 4.x under ntrun and runs them under ntr
 exceptions (`seh`, `jmpex`, `eh`), thread-local data (`tls`), threads (`thread`),
 arithmetic (`num`, `fpx`), the math functions of the C library (`math`), the x87 (`x87`, for x86 only),
 the tools (`tools`: mc, rc, lib, a DLL) and the command processor (`cmdtest.bat`, `drive`).
+`axp64` builds a C++ program, a DLL and a program with resources with the tools for 64-bit Alpha
+(`nt50/axp64` of TOOLS) and reads the headers of the files: ntrun cannot run them.
 The `*.out` files are what the same programs printed on real Windows NT 3.51
 (MIPS, Alpha, PowerPC and x86 VMs; `cmdtest` on CMD.EXE of NT 3.51).
 The CPUs are not the same in floating point, and each has its own C library: `num`, `fpx` and `math`
@@ -135,7 +140,7 @@ manual says, and `x87` does not test it:
 - QEMU does not see a push to a full register stack or the use of an empty register.
 - QEMU does not set C1 (the rounding made the result larger) or, for FPREM1, the bits of the quotient.
 
-## Tested on 2026-11-20 (macOS arm64, Linux arm64 and Linux x86-64: 39 of 39 tests)
+## Tested on 2026-11-20 (macOS arm64, Linux arm64 and Linux x86-64: 40 of 40 tests)
 
 | Tool set | CPUs | Tested |
 |---|---|---|
@@ -146,10 +151,13 @@ manual says, and `x87` does not test it:
 | NT 3.1 SDK (1993, 1994) | MIPS, Alpha, x86 | cl, cl386, mcl, claxp, cc + mip2coff (old MIPS compiler), acc, link32, nmake, rc + cvtres, mc, midl, asaxp, rebase, compress |
 | NT 3.5 SDK | Alpha, x86 (with Visual C++ 2.0) | cl, link, nmake, rc, mc, midl, asaxp; all the SDK samples with their own makefiles (Alpha: 347 programs, x86: 349) |
 | NT 4.0 SDK tools | MIPS, Alpha, PowerPC | mc, rc, midl 3.00 (with the Visual C++ 4.1 compiler; they need MSVCRT.DLL of NT 4.0) |
+| Platform SDK for Windows 2000 RC2, the tools for 64-bit Alpha | Alpha (the programs they make are for AXP64) | cl 13.00 (C, C++, exceptions, -MD, -Zi, -Z7), link 6.20 (also -debug, DLL), lib, rc, mc, midl -win64, cvtres, asaxp, dumpbin, editbin, nmake 6.00 of Visual C++ 6.0; MFC programs (static and DLL) |
 
 - A full `nmake` build of a small program (ntrshd) gives the same file as a build on Windows NT, byte for byte,
   but for the time stamps: Visual C++ 4.1 on the three RISC CPUs, the NT 3.1 SDK for MIPS, Alpha and x86,
   Visual C++ 2.0 and 4.2 for x86 (the link on a real NT 3.51 x86 machine).
+- AXP64: two programs (a console program, and a 628 KB program with windows, compiled with `/Ox`) are the
+  same files as from a build with the same tools on Windows for Alpha, byte for byte, but for the time stamps.
 - A link with the x86 `link` of Visual C++ 2.0 or 4.2 under Wine does not give the same file as on Windows NT:
   the imports are in another order (about 380 bytes of the program differ). Under ntrun the file is the same.
 - Object files from the x86 compilers are the same as under Wine, also for floating point

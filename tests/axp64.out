@@ -1,0 +1,6 @@
+eh.exe: 284 machine (Alpha64)
+eh.exe: 20B magic # (PE32+)
+app.exe: 284 machine (Alpha64)
+app.exe: 20B magic # (PE32+)
+mydll.dll: 284 machine (Alpha64)
+mydll.dll: 20B magic # (PE32+)

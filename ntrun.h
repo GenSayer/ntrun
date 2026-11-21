@@ -23,6 +23,7 @@ typedef int64_t s64;
 #define M_ALPHA 0x184
 #define M_PPC 0x1f0
 #define M_I386 0x14c
+#define M_AXP64 0x284 /* 64-bit Alpha: ntrun does not run it, it only knows the name */
 
 extern u8 *G; /* guest address 0 */
 extern u64 icount;

@@ -3,6 +3,7 @@
    takes off the stack when it returns on x86. -1: the caller takes them off (cdecl). */
     { "AreFileApisANSI", 0 },
     { "Beep", 8 },
+    { "CLSIDFromString", 8 },
     { "CharLowerA", 4 },
     { "CharLowerBuffA", 8 },
     { "CharNextA", 4 },

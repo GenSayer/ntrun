@@ -1259,6 +1259,10 @@ static struct module *load_image(const char *hpath, const char *name)
         case M_ALPHA: cpu = &cpu_alpha; break;
         case M_PPC: cpu = &cpu_ppc; break;
         case M_I386: cpu = &cpu_x86; break;
+        case M_AXP64:
+            /* The tools for AXP64 are 32-bit Alpha programs, and they run. What they make
+               needs a 64-bit Windows, and ntrun has the 32-bit system functions only. */
+            die("%s is a program for 64-bit Alpha (AXP64): ntrun runs 32-bit programs only", hpath);
         default: die("%s: machine type 0x%x is not supported", hpath, mach);
         }
         cpu->thunk(THUNK_BASE);
@@ -4188,6 +4192,31 @@ API(UuidToStringA)
 }
 API(RpcStringFreeA) { gfree(r32(a[0])); w32(a[0], 0); return 0; }
 
+/* OLE32: the C++ compilers from Visual C++ 5.0 on read the text of __declspec(uuid("...")) with
+   this: "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" in Unicode becomes the 16 bytes of a GUID. */
+API(CLSIDFromString)
+{
+    static const char form[] = "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}";
+    static const u8 place[16] = { 7, 5, 3, 1, 12, 10, 17, 15, 20, 22, 25, 27, 29, 31, 33, 35 }; /* of each byte */
+    char s[39];
+
+    if (!a[0]) {
+        memset(G + a[1], 0, 16);
+        return 0;
+    }
+    for (u32 i = 0; i < 39; i++) {
+        u16 c = r16(a[0] + i * 2);
+        if (form[i] == 'x' ? c > 127 || !isxdigit(c) : c != (u8)form[i])
+            return 0x800401f3; /* CO_E_CLASSSTRING */
+        s[i] = (char)c;
+    }
+    for (u32 i = 0; i < 16; i++) {
+        char h[3] = { s[place[i]], s[place[i] + 1], 0 };
+        w8(a[1] + i, (u8)strtoul(h, NULL, 16));
+    }
+    return 0;
+}
+
 /* NTDLL: the counted strings of the native API */
 API(RtlInitString)
 {
@@ -4976,7 +5005,7 @@ static const struct api builtin[] = {
     E(InterlockedExchange), E(IsTextUnicode), E(RegOpenKeyA), E(RegOpenKeyExA), E(RegCreateKeyA), E(RegCreateKeyExA),
     E(RegQueryValueA), E(RegQueryValueExA), E(RegSetValueExA), E(RegDeleteValueA), E(RegEnumKeyA), E(RegCloseKey),
     E(GetProfileStringA), E(GetPrivateProfileStringA), E(GetProfileIntA), E(GetPrivateProfileIntA),
-    E(WriteProfileStringA), E(WritePrivateProfileStringA), E(UuidCreate), E(UuidToStringA), E(RpcStringFreeA),
+    E(WriteProfileStringA), E(WritePrivateProfileStringA), E(UuidCreate), E(UuidToStringA), E(RpcStringFreeA), E(CLSIDFromString),
     E(RtlInitString), E(RtlInitAnsiString), E(RtlInitUnicodeString), E(RtlAnsiStringToUnicodeString),
     E(RtlUnicodeStringToAnsiString), E(RtlAnsiCharToUnicodeChar), E(RtlFreeUnicodeString), E(RtlFreeAnsiString),
     E(RtlNtStatusToDosError), E(RtlImageNtHeader), E(RtlImageDirectoryEntryToData), E(CheckSumMappedFile),
