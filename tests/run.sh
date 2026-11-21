@@ -9,6 +9,7 @@
 #   sys/CPU          CRTDLL.DLL of Windows NT for that CPU
 #   nt50/axp64       the tools for 64-bit Alpha (CPU axp64): 32-bit Alpha programs. ntrun cannot
 #                    run what they make, so the test reads the headers of the files they make.
+#   nt52/ia64        the tools for Itanium (CPU ia64): x86 programs. The same kind of test.
 # TOOLS can be the folder tools of the ntsdk repository: x86 is then ../nt40sdk/msdev.
 # NTRUN is the ntrun to test (default: the one in the folder above this one).
 # KEEP=1 keeps the work folder. The work folder is $WORK (default: /tmp/ntrun-tests).
@@ -19,7 +20,7 @@ tools=${1:-/opt}
 [ -d "$tools/nt40" ] || { echo "usage: run.sh [TOOLS [mips alpha ppc x86]]" >&2; exit 2; }
 tools=$(cd "$tools" && pwd)
 [ $# -eq 0 ] || shift
-[ $# -gt 0 ] || set -- mips alpha ppc x86 axp64
+[ $# -gt 0 ] || set -- mips alpha ppc x86 axp64 ia64
 work=${WORK:-/tmp/ntrun-tests}
 fail=0
 total=0
@@ -83,6 +84,30 @@ for cpu in "$@"; do
         check axp64 $cpu
         continue
     fi
+    if [ "$cpu" = ia64 ]; then
+        a=$tools/nt52/ia64
+        if [ ! -d "$a" ]; then
+            echo "  left out: $tools has no nt52/ia64"
+            continue
+        fi
+        # the same for Itanium. Each link needs bufferoverflowu.lib of this SDK (the -GS check).
+        NTRUN_DRIVE_C=$a
+        NTRUN_PATH='C:\mssdk\bin\win64;C:\mssdk\bin'
+        INCLUDE='C:\mssdk\include\crt;C:\mssdk\include'
+        LIB='C:\mssdk\lib\ia64'
+        NTRUN_DLLPATH=$tools/sys/x86
+        TMP="$(win "$d")"
+        LINK=bufferoverflowu.lib
+        export NTRUN_DRIVE_C NTRUN_PATH INCLUDE LIB NTRUN_DLLPATH TMP LINK
+        $ntrun cl -nologo -EHsc eh.cpp > eh.build 2>&1
+        $ntrun nmake -nologo -f tools.mak > tools.build 2>&1
+        for f in eh.exe app.exe mydll.dll; do
+            $ntrun link -dump -headers $f 2>&1 | tr -d '\r' | sed -n "s/^ *\\(.*machine (.*\\)$/$f: \\1/p; s/^ *\\(.*magic #.*\\)$/$f: \\1/p"
+        done > ia64.txt
+        unset NTRUN_DRIVE_C LINK
+        check ia64 $cpu
+        continue
+    fi
     v=$tools/nt40/$cpu/msdev
     [ -d "$v" ] || v=$tools/../nt40sdk/msdev
     INCLUDE="$(win "$v/include")"
@@ -120,6 +145,9 @@ for cpu in "$@"; do
     # C++ exceptions
     $cl -GX eh.cpp > eh.build 2>&1 && $ntrun eh.exe > eh.txt 2>&1
     check eh $cpu
+    # the MD5 and SHA-1 sums of the system
+    $cl hash.c > hash.build 2>&1 && $ntrun hash.exe > hash.txt 2>&1
+    check hash $cpu
     # mc, rc, lib, a DLL and a program that uses them
     if [ -f tools.mak ]; then
         $ntrun $v/bin/NMAKE.EXE -nologo -f tools.mak > tools.build 2>&1 && $ntrun app.exe > tools.txt 2>&1

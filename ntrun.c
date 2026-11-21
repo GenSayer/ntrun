@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -364,9 +365,14 @@ static char *gstr(u32 a) { return a ? (char *)(G + a) : NULL; }
 #define NCHUNK 0x8000u
 static u8 rmap[NCHUNK];
 
+static int region_top; /* the next region_alloc(0, ...) takes the highest free place (MEM_TOP_DOWN) */
+
 static u32 region_alloc(u32 addr, u32 size)
 {
     u32 n = (size + CHUNK - 1) / CHUNK, c, k;
+    int top = region_top;
+
+    region_top = 0;
 
     if (!n)
         n = 1;
@@ -377,6 +383,15 @@ static u32 region_alloc(u32 addr, u32 size)
         for (k = 0; k < n; k++)
             if (rmap[c + k])
                 return 0;
+    } else if (top) {
+        for (c = 0x7f00 - n; c >= 0x100; c--) {
+            for (k = 0; k < n && !rmap[c + k]; k++)
+                ;
+            if (k == n)
+                break;
+        }
+        if (c < 0x100)
+            return 0;
     } else {
         for (c = 0x100; c + n <= 0x7f00; c++) {
             for (k = 0; k < n && !rmap[c + k]; k++)
@@ -991,6 +1006,8 @@ struct module {
 };
 static struct module mods[64];
 static int nmods;
+static struct module *started[64]; /* the DLLs with a start function, in the order of their start */
+static int nstarted;
 
 struct api {
     const char *name;
@@ -1263,6 +1280,8 @@ static struct module *load_image(const char *hpath, const char *name)
             /* The tools for AXP64 are 32-bit Alpha programs, and they run. What they make
                needs a 64-bit Windows, and ntrun has the 32-bit system functions only. */
             die("%s is a program for 64-bit Alpha (AXP64): ntrun runs 32-bit programs only", hpath);
+        case M_IA64: /* the same: the tools for Itanium are x86 programs */
+            die("%s is a program for Itanium (IA-64): ntrun runs 32-bit programs only", hpath);
         default: die("%s: machine type 0x%x is not supported", hpath, mach);
         }
         cpu->thunk(THUNK_BASE);
@@ -1428,23 +1447,40 @@ static void tls_setup(struct module *m)
     }
 }
 
+/* Run the entry point of a DLL, after those of the DLLs that it imports from: the order of
+   Windows. A DLL that uses the C runtime DLL in its entry point needs that one started. */
+static void init_module(struct module *m)
+{
+    u32 opt;
+
+    if (m->inited)
+        return;
+    m->inited = 1;
+    opt = m->base + r32(m->base + 0x3c) + 24;
+    if (r32(opt + 92) > 1 && r32(opt + 96 + 8)) {
+        for (u32 d = m->base + r32(opt + 96 + 8); r32(d + 12); d += 20) {
+            int i = (int)(m - mods);
+            struct module *t = get_module(gstr(m->base + r32(d + 12)));
+            m = &mods[i];
+            if (t)
+                init_module(t);
+        }
+    }
+    if (m->is_dll && m->entry) {
+        u32 a[3] = { m->base, 1, 0 };
+        if (!guest_call(m->entry, 3, a))
+            die("%s: its start function failed", m->name);
+        started[nstarted++] = m;
+    }
+}
+
 /* run the entry points of the DLLs that are loaded and not started yet */
 static void init_dlls(void)
 {
     for (int i = 0; i < nmods; i++)
         tls_setup(&mods[i]);
-    /* later modules are the dependencies of earlier ones: start from the end */
-    for (int i = nmods - 1; i >= 0; i--) {
-        struct module *m = &mods[i];
-        if (m->inited)
-            continue;
-        m->inited = 1;
-        if (m->is_dll && m->entry) {
-            u32 a[3] = { m->base, 1, 0 };
-            if (!guest_call(m->entry, 3, a))
-                die("%s: its start function failed", m->name);
-        }
-    }
+    for (int i = 0; i < nmods; i++)
+        init_module(&mods[i]);
 }
 
 /* ---------------- time ---------------- */
@@ -1514,7 +1550,20 @@ API(IsBadReadPtr) { return a[0] < 0x10000 || (u64)a[0] + a[1] > GSIZE; }
 API(IsBadWritePtr) { return a[0] < 0x10000 || (u64)a[0] + a[1] > GSIZE; }
 API(IsBadCodePtr) { return a[0] < 0x10000 || a[0] >= GSIZE; }
 
-API(ExitProcess) { guest_exit(a[0]); }
+/* ExitProcess tells each DLL that the program ends (reason 0), the DLL that started last first.
+   The C runtime DLL of 2005 writes the rest of the output of the program at that time. */
+API(ExitProcess)
+{
+    static int ending;
+    if (!ending) {
+        ending = 1;
+        for (int i = nstarted - 1; i >= 0; i--) {
+            u32 b[3] = { started[i]->base, 0, 1 };
+            guest_call(started[i]->entry, 3, b);
+        }
+    }
+    guest_exit(a[0]);
+}
 API(TerminateProcess) { guest_exit(a[1]); }
 API(DebugBreak) { UNUSED; seh_fault(STATUS_BREAKPOINT, cpu->ra() - 4, 0, 0, 0); }
 
@@ -1707,7 +1756,9 @@ API(VirtualAlloc)
     u32 addr = a[0], size = a[1], type = a[2];
 
     if (type & 0x2000) { /* MEM_RESERVE */
-        u32 base = region_alloc(addr & ~(CHUNK - 1), size + (addr & (CHUNK - 1)));
+        u32 base;
+        region_top = !addr && (type & 0x100000); /* MEM_TOP_DOWN */
+        base = region_alloc(addr & ~(CHUNK - 1), size + (addr & (CHUNK - 1)));
         if (!base) {
             seterr(addr ? 487 : 8);
             return 0;
@@ -2349,24 +2400,29 @@ API(MultiByteToWideChar)
     return (u32)n;
 }
 
-API(WideCharToMultiByte)
+API(WideCharToMultiByte) /* (code page, flags, text, length, buffer, size, default character, was it used) */
 {
     s32 n = (s32)a[3];
+    u32 used = 0;
+    u8 def = a[6] ? r8(a[6]) : '?';
     if (n < 0) {
         for (n = 0; r16(a[2] + (u32)n * 2); n++)
             ;
         n++;
     }
-    if (!a[5])
-        return (u32)n;
-    if ((u32)n > a[5]) {
+    if (a[5] && (u32)n > a[5]) {
         seterr(122);
         return 0;
     }
     for (s32 i = 0; i < n; i++) {
         u16 c = r16(a[2] + (u32)i * 2);
-        w8(a[4] + (u32)i, c < 256 ? (u8)c : '?');
+        if (c >= 256)
+            used = 1;
+        if (a[5])
+            w8(a[4] + (u32)i, c < 256 ? (u8)c : def);
     }
+    if (a[7]) /* the C library of 2005 takes a character as not written when this is not 0 */
+        w32(a[7], used);
     return (u32)n;
 }
 
@@ -4535,13 +4591,15 @@ static u32 fm_arg(u32 flags, u32 args, u32 k)
 
 #define FM_INSERT_MAX 2048
 
+static int fm_w; /* FormatMessageW is at work: "s" and "c" are UTF-16, "hs", "hc", "S" and "C" are ANSI */
+
 /* FormatMessageA: the text of one insert. FMT is the printf format between the two "!" (without
    the "%"), V the argument, STAR the values for "*". "s" and "c" are ANSI; "ws", "ls", "S", "wc",
    "lc" and "C" are UTF-16. The text goes to OUT (FM_INSERT_MAX bytes); the result is its length. */
 static u32 fm_insert(char *out, const char *fmt, u32 v, const u32 *star)
 {
     char fl[8], spec[64], text[FM_INSERT_MAX];
-    int nf = 0, width = -1, prec = -1, wide = 0, ns = 0, len;
+    int nf = 0, width = -1, prec = -1, wide = fm_w, ns = 0, len;
     const char *p = fmt;
 
     while (*p && strchr("-+ #0", *p)) {
@@ -4574,8 +4632,7 @@ static u32 fm_insert(char *out, const char *fmt, u32 v, const u32 *star)
         }
     }
     for (; *p == 'h' || *p == 'l' || *p == 'w'; p++)
-        if (*p != 'h')
-            wide = 1;
+        wide = *p != 'h';
     if (width > FM_INSERT_MAX - 1)
         width = FM_INSERT_MAX - 1;
     len = snprintf(spec, sizeof spec, "%%%s", fl);
@@ -4585,7 +4642,7 @@ static u32 fm_insert(char *out, const char *fmt, u32 v, const u32 *star)
         len += snprintf(spec + len, sizeof spec - (size_t)len, ".%d", prec);
     switch (*p) {
     case 'S':
-        wide = 1;
+        wide = !fm_w;
         /* fall through */
     case 's':
         strcpy(spec + len, "s");
@@ -4602,7 +4659,7 @@ static u32 fm_insert(char *out, const char *fmt, u32 v, const u32 *star)
         len = snprintf(out, FM_INSERT_MAX, spec, text);
         break;
     case 'C':
-        wide = 1;
+        wide = !fm_w;
         /* fall through */
     case 'c':
         strcpy(spec + len, "c");
@@ -4952,6 +5009,596 @@ API(GetLocaleInfoW)
     return n;
 }
 
+/* ---------------- for the tools of 2005 (the IA-64 compiler of the Platform SDK) ----------------
+   Most are the wide character variants of functions above. */
+
+#define WK(name, k) API(name##W) { u32 b[8], s = w2a(a[k]), r; memcpy(b, a, sizeof b); b[k] = s; r = k_##name##A(b); gfree(s); return r; }
+WK(CreateEvent, 3) WK(CreateMutex, 2) WK(CreateSemaphore, 3) WK(CreateFileMapping, 5) WK(LoadLibrary, 0)
+WK(GetModuleHandle, 0)
+
+/* the text S of N characters to a buffer of SIZE wide characters: the length, or the size it needs */
+static u32 out_w(u32 buf, u32 size, u32 s, u32 n)
+{
+    if (n + 1 > size)
+        return n + 1;
+    for (u32 i = 0; i < n; i++)
+        w16(buf + i * 2, r8(s + i));
+    w16(buf + n * 2, 0);
+    return n;
+}
+
+API(InitializeCriticalSectionAndSpinCount) { k_InitializeCriticalSection(a); return 1; }
+API(SetProcessWorkingSetSize) { UNUSED; return 1; }
+API(GetUserDefaultUILanguage) { UNUSED; return 0x409; }
+API(IsDebuggerPresent) { UNUSED; return 0; }
+API(LoadLibraryExA) { return k_LoadLibraryA(a); } /* also a file with resources only: it has no start function */
+API(LoadLibraryExW) { return k_LoadLibraryW(a); }
+API(GetStartupInfoW) { return k_GetStartupInfoA(a); } /* the three text pointers are NULL */
+API(ReadConsoleInputW) { return k_ReadConsoleInputA(a); }
+API(CopyFileW) { u32 s = w2a(a[0]), t = w2a(a[1]), b[3] = { s, t, a[2] }, r = k_CopyFileA(b); gfree(s); gfree(t); return r; }
+
+API(ReadConsoleW)
+{
+    u32 tmp = galloc(a[2] + 1), b[5] = { a[0], tmp, a[2], a[3], 0 }, r = k_ReadFile(b);
+    if (r)
+        for (u32 i = 0; i < r32(a[3]); i++)
+            w16(a[1] + i * 2, r8(tmp + i));
+    gfree(tmp);
+    return r;
+}
+
+API(GetVersionExW)
+{
+    static const char sp[] = "Service Pack 3";
+    u32 p = a[0];
+    if (r32(p) < 276) {
+        seterr(122);
+        return 0;
+    }
+    w32(p + 4, 4);    /* Windows NT 4.0, build 1381 */
+    w32(p + 8, 0);
+    w32(p + 12, 1381);
+    w32(p + 16, 2);
+    for (u32 i = 0; i < sizeof sp; i++)
+        w16(p + 20 + i * 2, (u8)sp[i]);
+    if (r32(p) >= 284) { /* the longer form: service pack 3.0, a workstation */
+        w16(p + 276, 3);
+        w16(p + 278, 0);
+        w16(p + 280, 0);
+        w8(p + 282, 1);
+        w8(p + 283, 0);
+    }
+    return 1;
+}
+
+API(GetEnvironmentVariableW)
+{
+    u32 s = w2a(a[0]), tmp = galloc(32768), b[3] = { s, tmp, 32768 }, n = k_GetEnvironmentVariableA(b);
+    if (n)
+        n = out_w(a[1], a[2], tmp, n);
+    gfree(s);
+    gfree(tmp);
+    return n;
+}
+
+API(ExpandEnvironmentStringsW) /* the result counts the 0 at the end */
+{
+    u32 s = w2a(a[0]), tmp = galloc(32768), b[3] = { s, tmp, 32768 }, n = k_ExpandEnvironmentStringsA(b);
+    if (n && n <= a[2])
+        for (u32 i = 0; i < n; i++)
+            w16(a[1] + i * 2, r8(tmp + i));
+    gfree(s);
+    gfree(tmp);
+    return n;
+}
+
+API(GetTempPathW)
+{
+    u32 tmp = galloc(PATH_MAX), b[2] = { PATH_MAX, tmp }, n = k_GetTempPathA(b);
+    n = out_w(a[1], a[0], tmp, n);
+    gfree(tmp);
+    return n;
+}
+
+API(GetTempFileNameW)
+{
+    u32 s = w2a(a[0]), t = w2a(a[1]), tmp = galloc(PATH_MAX), b[4] = { s, t, a[2], tmp }, r = k_GetTempFileNameA(b);
+    if (r)
+        out_w(a[3], 260, tmp, (u32)strlen(gstr(tmp)));
+    gfree(s);
+    gfree(t);
+    gfree(tmp);
+    return r;
+}
+
+API(GetShortPathNameW)
+{
+    u32 s = w2a(a[0]), tmp = galloc(PATH_MAX), b[3] = { s, tmp, PATH_MAX }, n = k_GetShortPathNameA(b);
+    if (n)
+        n = out_w(a[1], a[2], tmp, n);
+    gfree(s);
+    gfree(tmp);
+    return n;
+}
+
+API(GetLongPathNameW) /* ntrun has no short names: the name itself, when the file is there */
+{
+    u32 s = w2a(a[0]), b[1] = { s }, n = (u32)strlen(gstr(s));
+    if (k_GetFileAttributesA(b) == INVALID)
+        n = 0;
+    else
+        n = out_w(a[1], a[2], s, n);
+    gfree(s);
+    return n;
+}
+
+API(GetComputerNameW)
+{
+    u32 tmp = galloc(64), sz = galloc(4), b[2] = { tmp, sz }, r, n;
+    w32(sz, 64);
+    r = k_GetComputerNameA(b);
+    n = r32(sz);
+    if (r && n + 1 > r32(a[1])) {
+        seterr(111);
+        r = 0;
+    } else if (r) {
+        out_w(a[0], n + 1, tmp, n);
+    }
+    w32(a[1], r ? n : n + 1);
+    gfree(tmp);
+    gfree(sz);
+    return r;
+}
+
+API(GetDiskFreeSpaceExW) /* the same numbers as GetDiskFreeSpaceA: 4 GB of 8 GB are free */
+{
+    if (a[1]) w64(a[1], 0x100000000ull);
+    if (a[2]) w64(a[2], 0x200000000ull);
+    if (a[3]) w64(a[3], 0x100000000ull);
+    return 1;
+}
+
+API(GetFileAttributesExA) /* (name, 0, attributes + three times + size) */
+{
+    char hp[PATH_MAX];
+    struct stat st;
+    u32 p = a[2];
+    to_host(gstr(a[0]), hp, sizeof hp);
+    if (a[1] || stat(hp, &st) < 0) {
+        seterr(a[1] ? 87 : werr(errno));
+        return 0;
+    }
+    w32(p, attrs_of(&st));
+    w64(p + 4, unix_to_ft(st.st_mtime, 0));
+    w64(p + 12, unix_to_ft(st.st_atime, 0));
+    w64(p + 20, unix_to_ft(st.st_mtime, 0));
+    w32(p + 28, (u32)((u64)st.st_size >> 32));
+    w32(p + 32, (u32)st.st_size);
+    return 1;
+}
+WK(GetFileAttributesEx, 0)
+
+API(FindResourceW) /* (module, name, type): a name is a number or a text */
+{
+    u32 n = a[1] >= 0x10000 ? w2a(a[1]) : a[1], t = a[2] >= 0x10000 ? w2a(a[2]) : a[2];
+    u32 b[3] = { a[0], n, t }, r = k_FindResourceA(b);
+    if (a[1] >= 0x10000) gfree(n);
+    if (a[2] >= 0x10000) gfree(t);
+    return r;
+}
+
+API(LoadStringW) /* with size 0: the address of the text in the resources goes to the buffer */
+{
+    u32 base = 0, e = res_entry(a[0], 6, (a[1] >> 4) + 1, &base), p, len;
+
+    if (a[3])
+        w16(a[2], 0);
+    if (!e)
+        return 0;
+    p = base + r32(e);
+    for (u32 k = 0; k < (a[1] & 15); k++)
+        p += 2 + 2 * r16(p);
+    len = r16(p);
+    if (!a[3]) {
+        w32(a[2], p + 2);
+        return len;
+    }
+    if (len > a[3] - 1)
+        len = a[3] - 1;
+    memmove(G + a[2], G + p + 2, len * 2);
+    w16(a[2] + len * 2, 0);
+    return len;
+}
+
+API(FormatMessageW) /* through FormatMessageA: the text and the "s" inserts are UTF-16 here */
+{
+    u32 b[8], src = 0, tmp = galloc(65536), n;
+
+    memcpy(b, a, sizeof b);
+    if (a[0] & 0x400)
+        b[1] = src = w2a(a[1]);
+    b[0] &= ~0x100u;
+    b[4] = tmp;
+    b[5] = 65536;
+    fm_w = 1;
+    n = k_FormatMessageA(b);
+    fm_w = 0;
+    if (!n) {
+        /* the error is set */
+    } else if (a[0] & 0x100) {
+        w32(a[4], a2w(gstr(tmp), n));
+    } else if (n + 1 > a[5]) {
+        seterr(122);
+        n = 0;
+    } else {
+        out_w(a[4], a[5], tmp, n);
+    }
+    gfree(src);
+    gfree(tmp);
+    return n;
+}
+
+static int wcmp(u32 x, u32 y, int nocase)
+{
+    for (;; x += 2, y += 2) {
+        u32 c1 = r16(x), c2 = r16(y);
+        if (nocase) {
+            c1 = mapchar(c1, 0x200);
+            c2 = mapchar(c2, 0x200);
+        }
+        if (c1 != c2)
+            return c1 < c2 ? -1 : 1;
+        if (!c1)
+            return 0;
+    }
+}
+API(lstrcmpW) { return (u32)wcmp(a[0], a[1], 0); }
+API(lstrcmpiW) { return (u32)wcmp(a[0], a[1], 1); }
+API(lstrcpyW)
+{
+    u32 n = 0;
+    if (!a[0] || !a[1])
+        return 0;
+    while (r16(a[1] + n * 2))
+        n++;
+    memmove(G + a[0], G + a[1], n * 2 + 2);
+    return a[0];
+}
+API(lstrcpynW) /* (to, from, size): at most size - 1 characters, and a 0 */
+{
+    u32 n = 0;
+    if (!a[0] || !a[1] || !a[2])
+        return 0;
+    while (n + 1 < a[2] && r16(a[1] + n * 2))
+        n++;
+    memmove(G + a[0], G + a[1], n * 2);
+    w16(a[0] + n * 2, 0);
+    return a[0];
+}
+API(lstrcatW)
+{
+    u32 n = 0, b[2];
+    if (!a[0] || !a[1])
+        return 0;
+    while (r16(a[0] + n * 2))
+        n++;
+    b[0] = a[0] + n * 2;
+    b[1] = a[1];
+    k_lstrcpyW(b);
+    return a[0];
+}
+API(CharNextW) { return r16(a[0]) ? a[0] + 2 : a[0]; }
+API(CharUpperW) /* a text, or one character in the low word */
+{
+    if (a[0] < 0x10000)
+        return mapchar(a[0], 0x200);
+    for (u32 p = a[0]; r16(p); p += 2)
+        w16(p, (u16)mapchar(r16(p), 0x200));
+    return a[0];
+}
+
+/* GetDateFormatA and GetTimeFormatA (locale, flags, time, picture, buffer, size): the pictures
+   of Windows. d, M, y and g for a date; h, H, m, s and t for a time; text in single quotes. */
+static u32 date_time_format(u32 *a, int date)
+{
+    static const char *days[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    static const char *months[] = { "January", "February", "March", "April", "May", "June", "July", "August",
+        "September", "October", "November", "December" };
+    static const int off[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    const char *pic = a[3] ? gstr(a[3]) : date ? ((a[1] & 2) ? "dddd, MMMM dd, yyyy" : "M/d/yyyy") : "h:mm:ss tt";
+    char out[512];
+    u32 n = 0, st[8];
+
+    if (a[2]) {
+        for (int i = 0; i < 8; i++)
+            st[i] = r16(a[2] + 2 * (u32)i);
+    } else {
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        st[0] = (u32)tm.tm_year + 1900;
+        st[1] = (u32)tm.tm_mon + 1;
+        st[3] = (u32)tm.tm_mday;
+        st[4] = (u32)tm.tm_hour;
+        st[5] = (u32)tm.tm_min;
+        st[6] = (u32)tm.tm_sec;
+    }
+    if (st[1] < 1 || st[1] > 12) {
+        seterr(87);
+        return 0;
+    }
+    {
+        u32 y = st[0] - (st[1] < 3);
+        st[2] = (y + y / 4 - y / 100 + y / 400 + (u32)off[st[1] - 1] + st[3]) % 7; /* the day of the week */
+    }
+    while (*pic && n < sizeof out - 40) {
+        char c = *pic;
+        int k = 0;
+        if (c == '\'') { /* text; two quotes are one quote */
+            for (pic++; *pic && n < sizeof out - 40; pic++) {
+                if (*pic == '\'') {
+                    if (pic[1] != '\'')
+                        break;
+                    pic++;
+                }
+                out[n++] = *pic;
+            }
+            if (*pic)
+                pic++;
+            continue;
+        }
+        while (pic[k] == c)
+            k++;
+        pic += k;
+        if (date && c == 'd' && k >= 3)
+            n += (u32)sprintf(out + n, k == 3 ? "%.3s" : "%s", days[st[2]]);
+        else if (date && c == 'd')
+            n += (u32)sprintf(out + n, k == 1 ? "%u" : "%02u", st[3]);
+        else if (date && c == 'M' && k >= 3)
+            n += (u32)sprintf(out + n, k == 3 ? "%.3s" : "%s", months[st[1] - 1]);
+        else if (date && c == 'M')
+            n += (u32)sprintf(out + n, k == 1 ? "%u" : "%02u", st[1]);
+        else if (date && c == 'y' && k <= 2)
+            n += (u32)sprintf(out + n, k == 1 ? "%u" : "%02u", st[0] % 100);
+        else if (date && c == 'y')
+            n += (u32)sprintf(out + n, "%04u", st[0]);
+        else if (date && c == 'g')
+            n += (u32)sprintf(out + n, "A.D.");
+        else if (!date && c == 'h')
+            n += (u32)sprintf(out + n, k == 1 ? "%u" : "%02u", st[4] % 12 ? st[4] % 12 : 12);
+        else if (!date && c == 'H')
+            n += (u32)sprintf(out + n, k == 1 ? "%u" : "%02u", st[4]);
+        else if (!date && c == 'm')
+            n += (u32)sprintf(out + n, k == 1 ? "%u" : "%02u", st[5]);
+        else if (!date && c == 's')
+            n += (u32)sprintf(out + n, k == 1 ? "%u" : "%02u", st[6]);
+        else if (!date && c == 't')
+            n += (u32)sprintf(out + n, k == 1 ? "%c" : "%cM", st[4] < 12 ? 'A' : 'P');
+        else
+            while (k-- && n < sizeof out - 40)
+                out[n++] = c;
+    }
+    out[n] = 0;
+    if (!a[5])
+        return n + 1;
+    if (n + 1 > a[5]) {
+        seterr(122);
+        return 0;
+    }
+    memcpy(G + a[4], out, n + 1);
+    return n + 1;
+}
+API(GetDateFormatA) { return date_time_format(a, 1); }
+API(GetTimeFormatA) { return date_time_format(a, 0); }
+
+/* ADVAPI32: the registry has nothing; there is no token of a user */
+API(RegOpenKeyExW) { UNUSED; return 2; }
+API(RegQueryValueExW) { UNUSED; return 2; }
+API(OpenProcessToken) { UNUSED; seterr(120); return 0; }
+API(GetTokenInformation) { UNUSED; seterr(120); return 0; }
+
+/* ADVAPI32: MD5 and SHA-1 sums and random numbers. The compiler makes a sum of each source file. */
+struct hash {
+    int used, alg, done;
+    u32 s[5], nbuf;
+    u64 len;
+    u8 buf[64], out[20];
+};
+static struct hash *hashes; /* the compiler keeps one for each file that it reads */
+static u32 nhashes;
+
+static u32 rol32(u32 x, int n) { return (x << n) | (x >> (32 - n)); }
+
+static void md5_block(u32 *s, const u8 *p)
+{
+    static const u8 r[64] = { 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20,
+        5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21 };
+    static u32 k[64];
+    u32 w[16], a = s[0], b = s[1], c = s[2], d = s[3];
+
+    if (!k[0])
+        for (int i = 0; i < 64; i++)
+            k[i] = (u32)(u64)(fabs(sin(i + 1.0)) * 4294967296.0);
+    for (int i = 0; i < 16; i++)
+        w[i] = (u32)p[4 * i] | (u32)p[4 * i + 1] << 8 | (u32)p[4 * i + 2] << 16 | (u32)p[4 * i + 3] << 24;
+    for (int i = 0; i < 64; i++) {
+        u32 f;
+        int g;
+        if (i < 16) { f = (b & c) | (~b & d); g = i; }
+        else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) & 15; }
+        else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) & 15; }
+        else { f = c ^ (b | ~d); g = (7 * i) & 15; }
+        f += a + k[i] + w[g];
+        a = d;
+        d = c;
+        c = b;
+        b += rol32(f, r[i]);
+    }
+    s[0] += a;
+    s[1] += b;
+    s[2] += c;
+    s[3] += d;
+}
+
+static void sha1_block(u32 *s, const u8 *p)
+{
+    u32 w[80], a = s[0], b = s[1], c = s[2], d = s[3], e = s[4];
+
+    for (int i = 0; i < 16; i++)
+        w[i] = (u32)p[4 * i] << 24 | (u32)p[4 * i + 1] << 16 | (u32)p[4 * i + 2] << 8 | (u32)p[4 * i + 3];
+    for (int i = 16; i < 80; i++)
+        w[i] = rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    for (int i = 0; i < 80; i++) {
+        u32 f, k, t;
+        if (i < 20) { f = (b & c) | (~b & d); k = 0x5a827999; }
+        else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+        else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc; }
+        else { f = b ^ c ^ d; k = 0xca62c1d6; }
+        t = rol32(a, 5) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = rol32(b, 30);
+        b = a;
+        a = t;
+    }
+    s[0] += a;
+    s[1] += b;
+    s[2] += c;
+    s[3] += d;
+    s[4] += e;
+}
+
+static void hash_add(struct hash *h, const u8 *p, u32 n)
+{
+    h->len += n;
+    while (n) {
+        u32 k = 64 - h->nbuf;
+        if (k > n)
+            k = n;
+        memcpy(h->buf + h->nbuf, p, k);
+        h->nbuf += k;
+        p += k;
+        n -= k;
+        if (h->nbuf == 64) {
+            if (h->alg == 0x8003) md5_block(h->s, h->buf); else sha1_block(h->s, h->buf);
+            h->nbuf = 0;
+        }
+    }
+}
+
+static void hash_end(struct hash *h)
+{
+    u64 bits = h->len * 8;
+    u8 pad[72] = { 0x80 }, lenb[8];
+    int md5 = h->alg == 0x8003;
+
+    if (h->done)
+        return;
+    for (int i = 0; i < 8; i++)
+        lenb[i] = (u8)(bits >> (md5 ? 8 * i : 56 - 8 * i));
+    hash_add(h, pad, h->nbuf < 56 ? 56 - h->nbuf : 120 - h->nbuf);
+    hash_add(h, lenb, 8);
+    for (int i = 0; i < (md5 ? 16 : 20); i++)
+        h->out[i] = (u8)(h->s[i / 4] >> (md5 ? 8 * (i % 4) : 24 - 8 * (i % 4)));
+    h->done = 1;
+}
+
+API(CryptAcquireContextA) { w32(a[0], 0xc0de0001); return 1; }
+API(CryptAcquireContextW) { w32(a[0], 0xc0de0001); return 1; }
+API(CryptReleaseContext) { UNUSED; return 1; }
+API(CryptGenRandom) /* (provider, length, buffer) */
+{
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0 || read(fd, G + a[2], a[1]) != (ssize_t)a[1])
+        for (u32 i = 0; i < a[1]; i++)
+            w8(a[2] + i, (u8)(random() >> 8));
+    if (fd >= 0)
+        close(fd);
+    return 1;
+}
+API(CryptCreateHash) /* (provider, algorithm, key, flags, the new handle) */
+{
+    static const u32 init[5] = { 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0 };
+    if (a[1] != 0x8003 && a[1] != 0x8004) { /* MD5, SHA-1 */
+        seterr(0x80090008);
+        return 0;
+    }
+    for (u32 i = 0;; i++) {
+        if (i == nhashes) {
+            nhashes = nhashes ? nhashes * 2 : 64;
+            hashes = realloc(hashes, nhashes * sizeof hashes[0]);
+            if (!hashes)
+                die("no memory");
+            memset(hashes + i, 0, (nhashes - i) * sizeof hashes[0]);
+        }
+        if (!hashes[i].used) {
+            memset(&hashes[i], 0, sizeof hashes[i]);
+            hashes[i].used = 1;
+            hashes[i].alg = (int)a[1];
+            memcpy(hashes[i].s, init, sizeof init);
+            w32(a[4], 0xc0de1000 + i);
+            return 1;
+        }
+    }
+}
+static struct hash *hash_of(u32 h)
+{
+    u32 i = h - 0xc0de1000;
+    if (i >= nhashes || !hashes[i].used) {
+        seterr(0x80090001);
+        return NULL;
+    }
+    return &hashes[i];
+}
+API(CryptHashData) /* (hash, data, length, flags) */
+{
+    struct hash *h = hash_of(a[0]);
+    if (!h || h->done) {
+        if (h)
+            seterr(0x8009000c);
+        return 0;
+    }
+    hash_add(h, G + a[1], a[2]);
+    return 1;
+}
+API(CryptGetHashParam) /* (hash, what, buffer, its size, flags): 1 the algorithm, 2 the sum, 4 its size */
+{
+    struct hash *h = hash_of(a[0]);
+    u32 size, v;
+    if (!h)
+        return 0;
+    size = a[1] == 2 ? (h->alg == 0x8003 ? 16 : 20) : 4;
+    v = a[1] == 1 ? (u32)h->alg : h->alg == 0x8003 ? 16 : 20;
+    if (a[1] != 1 && a[1] != 2 && a[1] != 4) {
+        seterr(0x8009000a);
+        return 0;
+    }
+    if (a[2] && r32(a[3]) < size) {
+        w32(a[3], size);
+        seterr(234);
+        return 0;
+    }
+    if (a[2]) {
+        if (a[1] == 2) {
+            hash_end(h);
+            memcpy(G + a[2], h->out, size);
+        } else {
+            w32(a[2], v);
+        }
+    }
+    w32(a[3], size);
+    return 1;
+}
+API(CryptDestroyHash)
+{
+    struct hash *h = hash_of(a[0]);
+    if (!h)
+        return 0;
+    h->used = 0;
+    return 1;
+}
+
 #define E(n) { #n, k_##n, 0 }
 static const struct api builtin[] = {
     E(GetVersion), E(GetLastError), E(SetLastError), E(GetCurrentProcess), E(GetCurrentThread), E(GetCurrentProcessId),
@@ -5014,6 +5661,16 @@ static const struct api builtin[] = {
     E(DeleteFileW), E(CreateDirectoryW), E(RemoveDirectoryW), E(SetCurrentDirectoryW), E(GetDriveTypeW),
     E(MoveFileW), E(SetEnvironmentVariableW), E(GetModuleFileNameW), E(GetCurrentDirectoryW), E(GetFullPathNameW),
     E(FindFirstFileW), E(FindNextFileW), E(CompareStringW), E(GetLocaleInfoW),
+    E(CreateEventW), E(CreateMutexW), E(CreateSemaphoreW), E(CreateFileMappingW), E(LoadLibraryW), E(GetModuleHandleW),
+    E(InitializeCriticalSectionAndSpinCount), E(SetProcessWorkingSetSize), E(GetUserDefaultUILanguage),
+    E(IsDebuggerPresent), E(LoadLibraryExA), E(LoadLibraryExW), E(GetStartupInfoW), E(ReadConsoleInputW), E(CopyFileW),
+    E(ReadConsoleW), E(GetVersionExW), E(GetEnvironmentVariableW), E(ExpandEnvironmentStringsW), E(GetTempPathW),
+    E(GetTempFileNameW), E(GetShortPathNameW), E(GetLongPathNameW), E(GetComputerNameW), E(GetDiskFreeSpaceExW),
+    E(GetFileAttributesExA), E(GetFileAttributesExW), E(FindResourceW), E(LoadStringW), E(FormatMessageW), E(lstrcmpW),
+    E(lstrcmpiW), E(lstrcpyW), E(lstrcpynW), E(lstrcatW), E(CharNextW), E(CharUpperW), E(GetDateFormatA),
+    E(GetTimeFormatA), E(RegOpenKeyExW), E(RegQueryValueExW), E(OpenProcessToken), E(GetTokenInformation),
+    E(CryptAcquireContextA), E(CryptAcquireContextW), E(CryptReleaseContext), E(CryptGenRandom), E(CryptCreateHash),
+    E(CryptHashData), E(CryptGetHashParam), E(CryptDestroyHash),
 };
 
 u32 api_dispatch(u32 index, const u32 *args)
@@ -5062,6 +5719,8 @@ static const struct { const char *name; int bytes; } x86args[] = {
     { "RtlFreeAnsiString", 4 }, { "RtlFreeUnicodeString", 4 }, { "RtlNtStatusToDosError", 4 },
     { "RtlImageNtHeader", 4 }, { "RtlImageDirectoryEntryToData", 16 }, { "RtlRaiseException", 4 },
     { "RtlAnsiCharToUnicodeChar", 4 }, { "RtlCopyMemory", 12 },
+    /* functions of Windows 2000 and later: the import libraries of these SDKs do not have them */
+    { "GetLongPathNameW", 12 }, { "GetUserDefaultUILanguage", 0 }, { "InitializeCriticalSectionAndSpinCount", 8 },
 };
 
 int api_argbytes(u32 index)

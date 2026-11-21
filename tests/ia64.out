@@ -1,0 +1,6 @@
+eh.exe: 200 machine (IA64)
+eh.exe: 20B magic # (PE32+)
+app.exe: 200 machine (IA64)
+app.exe: 20B magic # (PE32+)
+mydll.dll: 200 machine (IA64)
+mydll.dll: 20B magic # (PE32+)

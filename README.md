@@ -9,7 +9,8 @@ The Docker image [ntsdk](https://github.com/tenox7/ntsdk) has ntrun with these t
 Windows NT 3.1, 3.5 and 4.0 and the four CPUs.
 
 ntrun runs 32-bit programs only. The tools that make programs for 64-bit Alpha (AXP64) are
-32-bit Alpha programs, so they run. The programs that they make do not run.
+32-bit Alpha programs, and the cross compiler for Itanium (IA-64) is an x86 program, so they run.
+The programs that they make do not run.
 
 ## How it works
 
@@ -22,6 +23,8 @@ ntrun runs 32-bit programs only. The tools that make programs for 64-bit Alpha (
   and run in the interpreter too.
 - Windows exceptions work as on Windows NT (`seh.c`): function tables and unwind on the RISC CPUs,
   the handler list on x86; `__try`, C++ exceptions, `setjmp`/`longjmp`.
+- The start function of a DLL runs after those of the DLLs that it imports from, and each DLL
+  gets the notice that the program ends (the C runtime DLL of 2005 writes the last output then).
 - A program that starts another program (cl starts c1, c2 and link) starts a new ntrun.
 - Each thread of the program is a host thread. Only one of them runs at a time.
 - The command processor is part of ntrun (`cmd.c`): `cmd /c` lines of makefiles, batch files,
@@ -104,7 +107,7 @@ Copy them from the `system32` folder of a Windows NT system, or from its CD
 
 ## Tests
 
-    tests/run.sh [TOOLS [mips alpha ppc x86 axp64]]
+    tests/run.sh [TOOLS [mips alpha ppc x86 axp64 ia64]]
     make test TOOLS=/folder/with/the/tool/sets
 
 TOOLS is a folder with Visual C++ 4.x for each CPU, in the layout of the ntsdk image
@@ -119,9 +122,11 @@ On macOS, with the ntsdk repository next to this one: `tests/run.sh ../ntsdk/too
 Builds the test programs with Visual C++ 4.x under ntrun and runs them under ntrun:
 exceptions (`seh`, `jmpex`, `eh`), thread-local data (`tls`), threads (`thread`),
 arithmetic (`num`, `fpx`), the math functions of the C library (`math`), the x87 (`x87`, for x86 only),
+the MD5 and SHA-1 sums of the system (`hash`, against the values that `md5` and `shasum` give),
 the tools (`tools`: mc, rc, lib, a DLL) and the command processor (`cmdtest.bat`, `drive`).
 `axp64` builds a C++ program, a DLL and a program with resources with the tools for 64-bit Alpha
 (`nt50/axp64` of TOOLS) and reads the headers of the files: ntrun cannot run them.
+`ia64` does the same with the cross compiler for Itanium (`nt52/ia64` of TOOLS).
 The `*.out` files are what the same programs printed on real Windows NT 3.51
 (MIPS, Alpha, PowerPC and x86 VMs; `cmdtest` on CMD.EXE of NT 3.51).
 The CPUs are not the same in floating point, and each has its own C library: `num`, `fpx` and `math`
@@ -140,7 +145,7 @@ manual says, and `x87` does not test it:
 - QEMU does not see a push to a full register stack or the use of an empty register.
 - QEMU does not set C1 (the rounding made the result larger) or, for FPREM1, the bits of the quotient.
 
-## Tested on 2026-11-20 (macOS arm64, Linux arm64 and Linux x86-64: 40 of 40 tests)
+## Tested on 2026-11-21 (macOS arm64, Linux arm64 and Linux x86-64: 45 of 45 tests)
 
 | Tool set | CPUs | Tested |
 |---|---|---|
@@ -152,10 +157,16 @@ manual says, and `x87` does not test it:
 | NT 3.5 SDK | Alpha, x86 (with Visual C++ 2.0) | cl, link, nmake, rc, mc, midl, asaxp; all the SDK samples with their own makefiles (Alpha: 347 programs, x86: 349) |
 | NT 4.0 SDK tools | MIPS, Alpha, PowerPC | mc, rc, midl 3.00 (with the Visual C++ 4.1 compiler; they need MSVCRT.DLL of NT 4.0) |
 | Platform SDK for Windows 2000 RC2, the tools for 64-bit Alpha | Alpha (the programs they make are for AXP64) | cl 13.00 (C, C++, exceptions, -MD, -Zi, -Z7), link 6.20 (also -debug, DLL), lib, rc, mc, midl -win64, cvtres, asaxp, dumpbin, editbin, nmake 6.00 of Visual C++ 6.0; MFC programs (static and DLL) |
+| Platform SDK for Windows Server 2003 SP1, the cross compiler for Itanium | x86 (the programs they make are for IA-64) | cl 14.00 (C, C++, exceptions, -MD, -Z7), link 8.00 (also DLL, -dump, -edit), lib, nmake 7.00, rc, mc, midl -win64, cvtres, ias; MFC programs (static and DLL) |
 
 - A full `nmake` build of a small program (ntrshd) gives the same file as a build on Windows NT, byte for byte,
   but for the time stamps: Visual C++ 4.1 on the three RISC CPUs, the NT 3.1 SDK for MIPS, Alpha and x86,
   Visual C++ 2.0 and 4.2 for x86 (the link on a real NT 3.51 x86 machine).
+- Itanium: 12 object files (C, C++, MFC, a 500 KB program with `/Ox`, the assembler `ias`) and a linked
+  C program are the same files as from the same tools under Wine 8, but for the time stamps. There is no
+  build from a real Windows system to compare with. The linker of this SDK writes unused memory into some
+  bytes of a C++ program, so such a program is not the same file on two systems. `.pdb` files do not work:
+  `cl -Zi` and `link -debug` need a server program (`mspdbsrv.exe`) that talks RPC.
 - AXP64: two programs (a console program, and a 628 KB program with windows, compiled with `/Ox`) are the
   same files as from a build with the same tools on Windows for Alpha, byte for byte, but for the time stamps.
 - A link with the x86 `link` of Visual C++ 2.0 or 4.2 under Wine does not give the same file as on Windows NT:
