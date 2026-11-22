@@ -22,10 +22,13 @@ if command -v cygpath >/dev/null 2>&1; then
     ntrun=$(cygpath -m "$ntrun")
     hostpath() { cygpath -m "$1"; }
     win() { cygpath -w "$1"; }
+    # with a folder as drive C: the host's C:\dir is Z:\c\dir for the tools
+    winz() { m=$(cygpath -m "$1"); d=$(echo "${m%%:*}" | tr A-Z a-z); echo "Z:/$d${m#*:}" | tr / '\\'; }
     psep=';'
 else
     hostpath() { echo "$1"; }
-    win() { echo "Z:$1" | tr / '\'; }
+    win() { echo "Z:$1" | tr / '\\'; }
+    winz() { win "$1"; }
     psep=:
 fi
 tools=${1:-/opt}
@@ -83,7 +86,7 @@ for cpu in "$@"; do
         INCLUDE='C:\mssdk\include;C:\mssdk\include\win64\crt'
         LIB='C:\mssdk\lib\win64;C:\mssdk\lib\win64\crt'
         NTRUN_DLLPATH=$a/vc98/redist$psep$tools/sys/alpha
-        TMP="$(win "$d")"
+        TMP="$(winz "$d")"
         CL=-Ap64
         export NTRUN_DRIVE_C NTRUN_PATH INCLUDE LIB NTRUN_DLLPATH TMP CL
         $ntrun cl -nologo -GX eh.cpp > eh.build 2>&1
@@ -107,7 +110,7 @@ for cpu in "$@"; do
         INCLUDE='C:\mssdk\include\crt;C:\mssdk\include'
         LIB='C:\mssdk\lib\ia64'
         NTRUN_DLLPATH=$tools/sys/x86
-        TMP="$(win "$d")"
+        TMP="$(winz "$d")"
         LINK=bufferoverflowu.lib
         export NTRUN_DRIVE_C NTRUN_PATH INCLUDE LIB NTRUN_DLLPATH TMP LINK
         $ntrun cl -nologo -EHsc eh.cpp > eh.build 2>&1
