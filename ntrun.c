@@ -2721,12 +2721,14 @@ API(GetLocalTime)
 
 API(SetLocalTime) { UNUSED; seterr(5); return 0; }
 
-static long host_timezone(void) /* seconds west of UTC */
+/* seconds east of UTC for the broken-down local time TM (the zone, with summer time) */
+static long host_gmtoff(const struct tm *tm)
 {
 #ifdef _WIN32
-    return nt_timezone();
+    /* the Windows struct tm has no tm_gmtoff */
+    return nt_gmtoff(tm);
 #else
-    return _timezone;
+    return tm->tm_gmtoff;
 #endif
 }
 
@@ -2736,7 +2738,7 @@ API(GetTimeZoneInformation)
     struct tm tm;
     localtime_r(&t, &tm);
     memset(G + a[0], 0, 172);
-    w32(a[0], (u32)(s32)(host_timezone() / 60));
+    w32(a[0], (u32)(s32)(-host_gmtoff(&tm) / 60));
     return 0;
 }
 
@@ -2768,7 +2770,7 @@ static s64 local_offset(time_t t)
 {
     struct tm tm;
     localtime_r(&t, &tm);
-    return (s64)host_timezone() * 10000000ll;
+    return (s64)host_gmtoff(&tm) * 10000000ll;
 }
 
 API(FileTimeToLocalFileTime)

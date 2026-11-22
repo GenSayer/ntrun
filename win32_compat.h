@@ -132,11 +132,17 @@ static inline struct tm *nt_gmtime_r(const time_t *t, struct tm *r) { return gmt
 #define gmtime_r nt_gmtime_r
 #endif
 #define timegm _mkgmtime
-static inline long nt_timezone(void) /* seconds west of UTC, as _timezone of the Unix libraries */
+/* seconds east of UTC for a local time (tm_gmtoff of the Unix libraries): the zone, and the
+   summer time bias when tm_isdst is set */
+static inline long nt_gmtoff(const struct tm *tm)
 {
-    long tz = 0;
+    long tz = 0, db = 0;
+
+    _tzset();
     _get_timezone(&tz);
-    return tz;
+    if (tm->tm_isdst > 0)
+        _get_dstbias(&db);
+    return -tz - db;
 }
 
 static inline int nt_utimes(const char *path, const struct timeval tv[2])
