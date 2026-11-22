@@ -360,6 +360,9 @@ static void ppc_run(void)
                 case 31: res = -fma(a, c, b); break;
                 default: cpu_fault(STATUS_ILLEGAL_INSTRUCTION, pc, i);
                 }
+                /* an invalid operation gives the default NaN of the PowerPC (positive); an x86 host gives a negative one */
+                if (isnan(res) && !isnan(a) && !isnan(b) && !isnan(c))
+                    res = __builtin_nan("");
                 if (single)
                     res = (double)(float)res;
                 P.f[rt] = df(res);

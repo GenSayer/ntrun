@@ -25,9 +25,12 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#ifndef _WIN32
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+#include "win32_compat.h"
 
 #include "ntrun.h"
 
@@ -499,8 +502,14 @@ static int is_dir(const char *hp)
 
 static int same_file(const char *a, const char *b)
 {
+#ifdef _WIN32
+    /* the host gives no inode numbers: the same full path is the same file */
+    char pa[PATH_MAX], pb[PATH_MAX];
+    return realpath(a, pa) && realpath(b, pb) && !strcasecmp(pa, pb);
+#else
     struct stat sa, sb;
     return stat(a, &sa) == 0 && stat(b, &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+#endif
 }
 
 /* Copy the data of the file FROM to the open file OUT; 0 if it cannot be read.
@@ -1600,6 +1609,33 @@ static u32 run_pipeline(char *s)
         return 1;
     fflush(stdout);
     fflush(stderr);
+#ifdef _WIN32
+    {
+        /* no fork: the first command runs in a new ntrun, with the pipe as its output */
+        int save1 = dup(1);
+        char *line = malloc(strlen(s) + 16);
+        intptr_t proc;
+        (void)pid;
+        (void)wst;
+        sprintf(line, "cmd /c %s", s);
+        dup2(fd[1], 1);
+        close(fd[1]);
+        proc = start_program("cmd.exe", line);
+        dup2(save1, 1);
+        close(save1);
+        free(line);
+        save0 = dup(0);
+        dup2(fd[0], 0);
+        close(fd[0]);
+        st = run_pipeline(bar + 1);
+        fflush(stdout);
+        dup2(save0, 0);
+        close(save0);
+        if (proc != -1)
+            wait_program(proc);
+        return st;
+    }
+#else
     pid = fork();
     if (pid < 0)
         return 1;
@@ -1624,6 +1660,7 @@ static u32 run_pipeline(char *s)
     while (waitpid(pid, &wst, 0) < 0 && errno == EINTR)
         ;
     return st;
+#endif
 }
 
 /* commands with & (then), && (then, if it was good) and || (then, if it failed) between them.

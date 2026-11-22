@@ -16,16 +16,27 @@
 
 here=$(cd "$(dirname "$0")" && pwd)
 ntrun=${NTRUN:-$here/../ntrun}
+# MSYS2 with a native Windows ntrun.exe: paths for ntrun have a drive (C:/dir), as the host has them
+if command -v cygpath >/dev/null 2>&1; then
+    [ -f "$ntrun.exe" ] && ntrun=$ntrun.exe
+    ntrun=$(cygpath -m "$ntrun")
+    hostpath() { cygpath -m "$1"; }
+    win() { cygpath -w "$1"; }
+    psep=';'
+else
+    hostpath() { echo "$1"; }
+    win() { echo "Z:$1" | tr / '\'; }
+    psep=:
+fi
 tools=${1:-/opt}
 [ -d "$tools/nt40" ] || { echo "usage: run.sh [TOOLS [mips alpha ppc x86]]" >&2; exit 2; }
-tools=$(cd "$tools" && pwd)
+tools=$(hostpath "$(cd "$tools" && pwd)")
 [ $# -eq 0 ] || shift
 [ $# -gt 0 ] || set -- mips alpha ppc x86 axp64 ia64
-work=${WORK:-/tmp/ntrun-tests}
+work=$(hostpath "${WORK:-/tmp/ntrun-tests}")
 fail=0
 total=0
 
-win() { echo "Z:$1" | tr / '\\'; }
 
 check() { # check NAME CPU: compare NAME.txt with the expected output
     exp=$here/$1.out
@@ -71,7 +82,7 @@ for cpu in "$@"; do
         NTRUN_PATH='C:\mssdk\bin\win64;C:\mssdk\bin;C:\vc98\bin'
         INCLUDE='C:\mssdk\include;C:\mssdk\include\win64\crt'
         LIB='C:\mssdk\lib\win64;C:\mssdk\lib\win64\crt'
-        NTRUN_DLLPATH=$a/vc98/redist:$tools/sys/alpha
+        NTRUN_DLLPATH=$a/vc98/redist$psep$tools/sys/alpha
         TMP="$(win "$d")"
         CL=-Ap64
         export NTRUN_DRIVE_C NTRUN_PATH INCLUDE LIB NTRUN_DLLPATH TMP CL
@@ -113,7 +124,7 @@ for cpu in "$@"; do
     INCLUDE="$(win "$v/include")"
     LIB="$(win "$v/lib")"
     TMP="$(win "$d")"
-    NTRUN_DLLPATH=$v/redist:$tools/sys/$cpu
+    NTRUN_DLLPATH=$v/redist$psep$tools/sys/$cpu
     NTRUN_PATH="$(win "$v/bin")"
     unset NTRUN_DRIVE_C
     export INCLUDE LIB TMP NTRUN_DLLPATH NTRUN_PATH
