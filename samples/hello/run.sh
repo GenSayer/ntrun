@@ -1,12 +1,10 @@
 #!/bin/sh
 # run.sh [SDK-CPU ...]: build the test program (hello.c, hello.rc, makefile) with nmake for each
-# SDK and CPU of the ntsdk repository (comps/ntsdk-master, or NTSDK_ROOT) and run it with ntrun.
+# SDK and CPU of the ntsdk repository (../ntsdk next to this project, or NTSDK_ROOT) and run it with ntrun.
 # No Docker: ntsdk-env.sh sets the environment that the ntsdk script of the image sets.
 # The program prints the CPU type of its own file and the version of its compiler.
 # ntrun cannot run a program for 64-bit Alpha (axp64) or Itanium (ia64): there the test reads
 # the header of the program with the dump of the linker.
-# The files that the x86 compilers make are not compared with those of the Wine images
-# (pecmp.pl): that needs Docker.
 #
 # On MSYS2 run it with MSYS2_ARG_CONV_EXCL="*" (the shell must not change /c into C:/).
 # KEEP=1 keeps the work folder. The work folder is $WORK (default: /tmp/ntsdk-tests).

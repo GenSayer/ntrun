@@ -162,6 +162,12 @@ for cpu in "$@"; do
     # the MD5 and SHA-1 sums of the system
     $cl hash.c > hash.build 2>&1 && $ntrun hash.exe > hash.txt 2>&1
     check hash $cpu
+    # a pipe from a child process: _popen, and a pipe of CreatePipe as the output of the child
+    $cl popen.c > popen.build 2>&1 && $ntrun popen.exe > popen.txt 2>&1
+    check popen $cpu
+    # a view of a file that can be written is the file: the views, ReadFile and WriteFile agree
+    $cl mapview.c > mapview.build 2>&1 && $ntrun mapview.exe > mapview.txt 2>&1
+    check mapview $cpu
     # mc, rc, lib, a DLL and a program that uses them
     if [ -f tools.mak ]; then
         $ntrun $v/bin/NMAKE.EXE -nologo -f tools.mak > tools.build 2>&1 && $ntrun app.exe > tools.txt 2>&1

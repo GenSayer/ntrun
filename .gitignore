@@ -2,6 +2,3 @@
 /ntrun-new
 *.dSYM
 /ntrun.exe
-/comps/
-/samples/*
-!/samples/hello/

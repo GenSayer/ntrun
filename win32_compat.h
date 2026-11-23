@@ -27,9 +27,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifndef PATH_MAX
+/* mingw's limits.h has 260 for PATH_MAX, too small for the host paths of the guest */
+#undef PATH_MAX
 #define PATH_MAX 4096
-#endif
 #ifndef NAME_MAX
 #define NAME_MAX 255
 #endif
@@ -89,10 +89,11 @@ static inline char *nt_realpath(const char *path, char *resolved)
 }
 #define realpath nt_realpath
 
-/* a pipe of file descriptors: both ends binary, not inherited by programs that we start */
+/* a pipe of file descriptors: both ends binary, and inherited by the programs that we start (the
+   guest hands a pipe to a child process, as _popen does; a Unix pipe is inherited too) */
 static inline int nt_pipe(int fds[2])
 {
-    return _pipe(fds, 65536, _O_BINARY | _O_NOINHERIT);
+    return _pipe(fds, 65536, _O_BINARY);
 }
 #define pipe nt_pipe
 
@@ -192,8 +193,6 @@ static inline int nt_setenv(const char *name, const char *value, int overwrite)
 static inline int nt_unsetenv(const char *name) { return _putenv_s(name, ""); }
 #define setenv nt_setenv
 #define unsetenv nt_unsetenv
-#define srandom srand
-#define random rand
 
 /* ioctl(fd, FIONREAD, &n): the bytes that a pipe has ready */
 #define FIONREAD 0x541B

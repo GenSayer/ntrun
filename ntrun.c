@@ -78,6 +78,7 @@ void die(const char *fmt, ...)
    the full code from a pipe; the host only keeps 8 bits. */
 static void exit_files(void);
 static void views_sync(void);
+static void views_sync_fd(int fd);
 void guest_exit(u32 code) __attribute__((noreturn));
 void guest_exit(u32 code)
 {
@@ -429,6 +430,80 @@ static u8 rmap[NCHUNK];
 
 static int region_top; /* the next region_alloc(0, ...) takes the highest free place (MEM_TOP_DOWN) */
 
+#ifdef _WIN32
+/*
+ * Windows host: the guest memory is one reservation, and a region is committed when region_alloc
+ * gives it to the program and decommitted (zero again) when region_free takes it back. A view of
+ * a file can only be mapped at a place that is free address space, and a piece of a reservation
+ * cannot be given back. So there is a zone of 32 MB (ZONE_N regions) in which each region of
+ * 64 KB is a reservation of its own. region_alloc never takes it (rmap is 2 there); the views
+ * of files that the program can write take their place in it (region_alloc_zone).
+ */
+#define ZONE_C 0x6e00u /* the first region of the zone (guest address 6e000000) */
+#define ZONE_N 0x200u
+#define IN_ZONE(c) ((c) >= ZONE_C && (c) < ZONE_C + ZONE_N)
+
+static int host_reserve(void)
+{
+    for (int attempt = 0; attempt < 32; attempt++) {
+        u8 *p = VirtualAlloc(NULL, 0x100000000ull, MEM_RESERVE, PAGE_NOACCESS);
+        u32 k;
+
+        if (!p)
+            return 0;
+        VirtualFree(p, 0, MEM_RELEASE);
+        if (!VirtualAlloc(p, (size_t)ZONE_C * CHUNK, MEM_RESERVE, PAGE_NOACCESS))
+            continue;
+        if (!VirtualAlloc(p + (size_t)(ZONE_C + ZONE_N) * CHUNK, 0x100000000ull - (size_t)(ZONE_C + ZONE_N) * CHUNK,
+                MEM_RESERVE, PAGE_NOACCESS)) {
+            VirtualFree(p, 0, MEM_RELEASE);
+            continue;
+        }
+        for (k = 0; k < ZONE_N; k++)
+            if (!VirtualAlloc(p + (size_t)(ZONE_C + k) * CHUNK, CHUNK, MEM_RESERVE, PAGE_NOACCESS))
+                break;
+        if (k == ZONE_N) {
+            G = p;
+            memset(rmap + ZONE_C, 2, ZONE_N);
+            return 1;
+        }
+        /* something else took a place of the hole: give all back, try another hole */
+        while (k--)
+            VirtualFree(p + (size_t)(ZONE_C + k) * CHUNK, 0, MEM_RELEASE);
+        VirtualFree(p, 0, MEM_RELEASE);
+        VirtualFree(p + (size_t)(ZONE_C + ZONE_N) * CHUNK, 0, MEM_RELEASE);
+    }
+    return 0;
+}
+
+static int host_commit(u32 addr, u32 n)
+{
+    if (!IN_ZONE(addr / CHUNK))
+        return VirtualAlloc(G + addr, (size_t)n * CHUNK, MEM_COMMIT, PAGE_READWRITE) != NULL;
+    for (u32 k = 0; k < n; k++)
+        if (!VirtualAlloc(G + addr + (size_t)k * CHUNK, CHUNK, MEM_COMMIT, PAGE_READWRITE)) {
+            while (k--)
+                VirtualFree(G + addr + (size_t)k * CHUNK, CHUNK, MEM_DECOMMIT);
+            return 0;
+        }
+    return 1;
+}
+
+/* the regions have no pages, and are reserved (also those that a view of a file had) */
+static void host_decommit(u32 addr, u32 n)
+{
+    if (!IN_ZONE(addr / CHUNK)) {
+        VirtualFree(G + addr, (size_t)n * CHUNK, MEM_DECOMMIT);
+        return;
+    }
+    for (u32 k = 0; k < n; k++) {
+        u8 *p = G + addr + (size_t)k * CHUNK;
+        VirtualFree(p, CHUNK, MEM_DECOMMIT);
+        VirtualAlloc(p, CHUNK, MEM_RESERVE, PAGE_NOACCESS); /* fails when it is reserved still */
+    }
+}
+#endif
+
 static u32 region_alloc(u32 addr, u32 size)
 {
     u32 n = (size + CHUNK - 1) / CHUNK, c, k;
@@ -466,6 +541,12 @@ static u32 region_alloc(u32 addr, u32 size)
             return 0;
     }
     memset(rmap + c, 1, n);
+#ifdef _WIN32
+    if (!host_commit(c * CHUNK, n)) { /* the host has no memory for it: the program gets the error */
+        memset(rmap + c, 0, n);
+        return 0;
+    }
+#endif
     return c * CHUNK;
 }
 
@@ -476,16 +557,41 @@ static void region_free(u32 addr, u32 size)
     if (!n)
         n = 1;
     memset(rmap + c, 0, n);
+#ifdef _WIN32
+    if (IN_ZONE(c)) /* the zone stays the zone */
+        memset(rmap + c, 2, n);
+#endif
     /* give the host fresh zero pages there */
 #ifdef _WIN32
-    if (!VirtualFree(G + addr, (size_t)n * CHUNK, MEM_DECOMMIT) ||
-        !VirtualAlloc(G + addr, (size_t)n * CHUNK, MEM_COMMIT, PAGE_READWRITE))
-        die("region_free: VirtualAlloc: error %lu", GetLastError());
+    host_decommit(addr, n);
 #else
     if (mmap(G + addr, (size_t)n * CHUNK, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) == MAP_FAILED)
         die("region_free: mmap: %s", strerror(errno));
 #endif
 }
+
+#ifdef _WIN32
+/* a place for a view of a file: regions of the zone, committed */
+static u32 region_alloc_zone(u32 size)
+{
+    u32 n = (size + CHUNK - 1) / CHUNK, c, k;
+
+    if (!n)
+        n = 1;
+    for (c = ZONE_C; c + n <= ZONE_C + ZONE_N; c++) {
+        for (k = 0; k < n && rmap[c + k] == 2; k++)
+            ;
+        if (k == n) {
+            if (!host_commit(c * CHUNK, n))
+                return 0;
+            memset(rmap + c, 1, n);
+            return c * CHUNK;
+        }
+        c += k;
+    }
+    return 0;
+}
+#endif
 
 /* VirtualAlloc reservations */
 static struct { u32 base, size; } vres[4096];
@@ -854,8 +960,16 @@ static void to_host_plain(const char *g, char *out, size_t n)
             int l = letter;
             if (!l && getcwd(cwd, sizeof cwd))
                 l = drive_of(cwd, &rest);
-            if (toupper(l) == root_letter && isalpha((unsigned char)p[1]) && (!p[2] || p[2] == 0x5c || p[2] == '/'))
-                snprintf(tmp, sizeof tmp, "%c:%s", p[1], p[2] ? p + 2 : "/");
+            if (toupper(l) == root_letter) {
+                if (isalpha((unsigned char)p[1]) && (!p[2] || p[2] == 0x5c || p[2] == '/')) {
+                    snprintf(tmp, sizeof tmp, "%c:%s", p[1], p[2] ? p + 2 : "/");
+                } else {
+                    /* Z:\name is not a drive of the host: it is below the root of the system drive
+                       (Z:\windows\system32 is the system folder), not the host's Z: */
+                    const char *sd = getenv("SystemDrive");
+                    snprintf(tmp, sizeof tmp, "%s%s", sd && sd[0] && sd[1] == ':' ? sd : "C:", p);
+                }
+            }
         }
 #endif
     } else if (letter && ndrives) {
@@ -1996,8 +2110,8 @@ static void exit_files(void)
 
 static void hclose(struct hnd *x)
 {
-    if (x->type == HT_FILE || x->type == HT_MAP)
-        views_sync();
+    if ((x->type == HT_FILE || x->type == HT_MAP) && x->fd >= 0)
+        views_sync_fd(x->fd);
     switch (x->type) {
     case HT_FILE:
     case HT_MAP:
@@ -2034,7 +2148,7 @@ API(ReadFile)
     int fd = hfd(a[0]), blk, e;
     struct thread *me = cur;
 
-    views_sync();
+    views_sync_fd(fd);
     struct stat st;
     ssize_t n;
 
@@ -3030,17 +3144,80 @@ API(GetModuleFileNameA)
 }
 
 /* file mappings */
-static struct { u32 addr, len, off; int fd, shared; } views[256];
+static struct {
+    u32 addr, len, off;
+    int fd;
+    int copy;   /* Windows host, no mapping: a copy in memory that is written back to the file */
+    int mapped; /* Windows host: a real view of the file at that address (MapViewOfFileEx) */
+    u64 vol, idx; /* which file (a copy) */
+} views[256];
 static int nviews;
 
-/* Windows host: a view of a file that can be written is a copy in memory, the file gets it
-   back when the program flushes or closes, and before it reads the file */
+#ifdef _WIN32
+/* the number of the file of a file descriptor: the same file has the same number */
+static int file_number(int fd, u64 *vol, u64 *idx)
+{
+    BY_HANDLE_FILE_INFORMATION i;
+
+    if (!GetFileInformationByHandle((HANDLE)_get_osfhandle(fd), &i))
+        return 0;
+    *vol = i.dwVolumeSerialNumber;
+    *idx = ((u64)i.nFileIndexHigh << 32) | i.nFileIndexLow;
+    return 1;
+}
+
+/* A view of a file that can be written is a real view when the host can map the file at
+   the address of the guest. Where it cannot (the file is not open for writing, the offset
+   is not a multiple of 64 KB), the view is a copy in memory: the file gets the copy back
+   when the program flushes, reads or writes the file, closes it or ends. */
+static void views_sync_one(int i)
+{
+    if (views[i].copy && views[i].fd >= 0)
+        pwrite(views[i].fd, G + views[i].addr, views[i].len, views[i].off);
+}
+
 static void views_sync(void)
 {
     for (int i = 0; i < nviews; i++)
-        if (views[i].shared && views[i].fd >= 0)
-            pwrite(views[i].fd, G + views[i].addr, views[i].len, views[i].off);
+        views_sync_one(i);
 }
+
+static void views_sync_fd(int fd)
+{
+    u64 vol, idx;
+
+    if (!nviews || !file_number(fd, &vol, &idx))
+        return;
+    for (int i = 0; i < nviews; i++)
+        if (views[i].copy && views[i].vol == vol && views[i].idx == idx)
+            views_sync_one(i);
+}
+
+/* map the file of FD at the guest address ADDR (regions of 64 KB that region_alloc gave) */
+static int map_view(int fd, u32 addr, u32 len, u32 off)
+{
+    HANDLE sec = CreateFileMappingA((HANDLE)_get_osfhandle(fd), NULL, PAGE_READWRITE, 0, 0, NULL);
+    u32 n = (len + CHUNK - 1) / CHUNK;
+    void *p;
+
+    if (!sec || (off & (CHUNK - 1)))
+        return 0;
+    for (u32 k = 0; k < n; k++)
+        VirtualFree(G + addr + (size_t)k * CHUNK, 0, MEM_RELEASE); /* the places are free now */
+    p = MapViewOfFileEx(sec, FILE_MAP_WRITE, 0, off, len, G + addr);
+    CloseHandle(sec); /* the view keeps the file mapping */
+    if (p == G + addr)
+        return 1;
+    if (p)
+        UnmapViewOfFile(p);
+    host_decommit(addr, n);
+    host_commit(addr, n);
+    return 0;
+}
+#else
+static void views_sync(void) {}
+static void views_sync_fd(int fd) { (void)fd; }
+#endif
 
 API(CreateFileMappingA)
 {
@@ -3088,36 +3265,61 @@ API(MapViewOfFileEx)
     }
     if (!len)
         len = x->size - off;
-    addr = region_alloc(a[5], len);
+    addr = 0;
+#ifdef _WIN32
+    /* a view of a file that the program can write goes to the zone, where it can be mapped */
+    if (!a[5] && x->fd >= 0 && (a[1] & 2))
+        addr = region_alloc_zone(len);
+#endif
+    if (!addr)
+        addr = region_alloc(a[5], len);
     if (!addr) {
         seterr(487);
         return 0;
     }
     if (x->fd >= 0) {
         shared = (a[1] & 2) != 0; /* FILE_MAP_WRITE; FILE_MAP_ALL_ACCESS has it too */
-#ifndef _WIN32
-        size_t hlen, ps = (size_t)getpagesize();
-        hlen = ((size_t)len + ps - 1) & ~(ps - 1);
-        mapped = (off % ps) == 0 &&
-            mmap(G + addr, hlen, PROT_READ | PROT_WRITE, MAP_FIXED | (shared ? MAP_SHARED : MAP_PRIVATE), x->fd, off) != MAP_FAILED;
-#endif
+#ifdef _WIN32
+        if (shared && IN_ZONE(addr / CHUNK))
+            mapped = map_view(x->fd, addr, len, off);
         if (!mapped) {
-            /* cannot map (Windows: no mapping at a fixed address): read it; a view that can be
-               written is written back to the file when it ends */
+            /* a private view, or one that cannot be mapped: a copy. A copy that can be written
+               is written back to the file (views_sync) */
             if (pread(x->fd, G + addr, len, off) < 0) {
                 region_free(addr, len);
                 seterr(werr(errno));
                 return 0;
             }
         }
+#else
+        size_t hlen, ps = (size_t)getpagesize();
+        hlen = ((size_t)len + ps - 1) & ~(ps - 1);
+        if ((off % ps) != 0 || mmap(G + addr, hlen, PROT_READ | PROT_WRITE, MAP_FIXED | (shared ? MAP_SHARED : MAP_PRIVATE), x->fd, off) == MAP_FAILED) {
+            /* cannot map: read it */
+            if (shared)
+                die("MapViewOfFile: cannot map the file for writing: %s", strerror(errno));
+            if (pread(x->fd, G + addr, len, off) < 0) {
+                region_free(addr, len);
+                seterr(werr(errno));
+                return 0;
+            }
+        }
+#endif
     }
     if (nviews == 256)
         die("too many file views");
     views[nviews].addr = addr;
     views[nviews].len = len;
     views[nviews].off = off;
-    views[nviews].shared = shared && !mapped;
-    views[nviews].fd = views[nviews].shared ? dup(x->fd) : -1; /* the view outlives the handle */
+    views[nviews].mapped = mapped;
+    views[nviews].copy = 0;
+    views[nviews].fd = -1;
+#ifdef _WIN32
+    if (shared && !mapped && file_number(x->fd, &views[nviews].vol, &views[nviews].idx)) {
+        views[nviews].copy = 1;
+        views[nviews].fd = dup(x->fd); /* the view outlives the handle */
+    }
+#endif
     nviews++;
     return addr;
 }
@@ -3128,10 +3330,13 @@ API(UnmapViewOfFile)
 {
     for (int i = 0; i < nviews; i++)
         if (views[i].addr == a[0]) {
-            if (views[i].shared && views[i].fd >= 0)
-                pwrite(views[i].fd, G + views[i].addr, views[i].len, views[i].off);
+#ifdef _WIN32
+            views_sync_one(i);
             if (views[i].fd >= 0)
                 close(views[i].fd);
+            if (views[i].mapped)
+                UnmapViewOfFile(G + views[i].addr);
+#endif
             region_free(views[i].addr, views[i].len);
             views[i] = views[--nviews];
             return 1;
@@ -4321,17 +4526,17 @@ API(VirtualQuery)
         seterr(87);
         return 0;
     }
-    for (abase = c; abase > 0 && rmap[abase - 1] == rmap[c]; abase--)
+    for (abase = c; abase > 0 && (rmap[abase - 1] == 1) == (rmap[c] == 1); abase--)
         ;
-    for (n = c; n < NCHUNK && rmap[n] == rmap[c]; n++)
+    for (n = c; n < NCHUNK && (rmap[n] == 1) == (rmap[c] == 1); n++)
         ;
     w32(p, base);
     w32(p + 4, abase * CHUNK);
     w32(p + 8, 4);
     w32(p + 12, n * CHUNK - base);
-    w32(p + 16, rmap[c] ? 0x1000 : 0x10000); /* MEM_COMMIT or MEM_FREE */
-    w32(p + 20, rmap[c] ? 4 : 1);
-    w32(p + 24, rmap[c] ? 0x20000 : 0);
+    w32(p + 16, (rmap[c] == 1) ? 0x1000 : 0x10000); /* MEM_COMMIT or MEM_FREE */
+    w32(p + 20, (rmap[c] == 1) ? 4 : 1);
+    w32(p + 24, (rmap[c] == 1) ? 0x20000 : 0);
     return 28;
 }
 
@@ -4573,6 +4778,15 @@ API(WritePrivateProfileStringA) { UNUSED; return 1; }
 /* RPCRT4: uuidgen needs these three */
 API(UuidCreate)
 {
+#ifdef _WIN32
+    /* rand() has 15 bits: take the bytes from rand_s */
+    for (int i = 0; i < 16; i++) {
+        unsigned int v;
+        if (rand_s(&v) != 0)
+            v = (unsigned)rand();
+        w8(a[0] + (u32)i, (u8)(v >> 8));
+    }
+#else
     static int seeded;
     if (!seeded) {
         srandom((unsigned)(time(NULL) ^ getpid()));
@@ -4580,6 +4794,7 @@ API(UuidCreate)
     }
     for (int i = 0; i < 16; i++)
         w8(a[0] + (u32)i, (u8)(random() >> 8));
+#endif
     w8(a[0] + 7, (u8)((r8(a[0] + 7) & 0x0f) | 0x40)); /* version 4, in the little-endian third field */
     w8(a[0] + 8, (u8)((r8(a[0] + 8) & 0x3f) | 0x80));
     return 0;
@@ -5857,23 +6072,20 @@ API(CryptReleaseContext) { UNUSED; return 1; }
 API(CryptGenRandom) /* (provider, length, buffer) */
 {
 #ifdef _WIN32
-    int fd = -1;
     for (u32 i = 0; i < a[1]; i++) {
         unsigned int v;
         if (rand_s(&v) != 0)
             v = (unsigned)rand();
         w8(a[2] + i, (u8)(v >> 8));
     }
-    if (fd < 0 && a[1])
-        return 1;
 #else
     int fd = open("/dev/urandom", O_RDONLY);
-#endif
     if (fd < 0 || read(fd, G + a[2], a[1]) != (ssize_t)a[1])
         for (u32 i = 0; i < a[1]; i++)
             w8(a[2] + i, (u8)(random() >> 8));
     if (fd >= 0)
         close(fd);
+#endif
     return 1;
 }
 API(CryptCreateHash) /* (provider, algorithm, key, flags, the new handle) */
@@ -6283,11 +6495,8 @@ int main(int argc, char **argv)
 #endif
 
 #ifdef _WIN32
-    G = VirtualAlloc(NULL, 0x100000000ull, MEM_RESERVE, PAGE_NOACCESS);
-    if (!G)
+    if (!host_reserve())
         die("cannot reserve the guest address space: error %lu", GetLastError());
-    if (!VirtualAlloc(G + 0x10000, GSIZE - 0x10000, MEM_COMMIT, PAGE_READWRITE))
-        die("cannot commit the guest memory: error %lu", GetLastError());
     AddVectoredExceptionHandler(1, on_fault);
 #else
     G = mmap(NULL, 0x100000000ull, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
@@ -6307,9 +6516,15 @@ int main(int argc, char **argv)
 
     /* reserved: the thunks and the MIPS user PCR page */
     rmap[THUNK_BASE / CHUNK] = 1;
-    seh_init();
     rmap[0x7fff0000 / CHUNK] = 1;
     rmap[0x7ffe0000 / CHUNK] = 1;
+#ifdef _WIN32
+    /* also the region below the thunks: a walk up the stack reads the word before a return address */
+    if (!host_commit(THUNK_BASE - CHUNK, 1) || !host_commit(THUNK_BASE, 1) || !host_commit(0x7fff0000, 1) ||
+        !host_commit(0x7ffe0000, 1))
+        die("cannot commit the guest memory: error %lu", GetLastError());
+#endif
+    seh_init();
     apis[0].name = "(return)";
     napis = 1;
     for (size_t i = 0; i < sizeof builtin / sizeof builtin[0]; i++)

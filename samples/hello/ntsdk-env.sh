@@ -1,14 +1,15 @@
 #!/bin/sh
 # ntsdk-env.sh: source it, then call "ntsdk_env SDK CPU" to set the environment of one SDK for
-# one CPU, as the ntsdk script of the image does (comps/ntsdk-master/ntsdk), with no Docker.
+# one CPU, as the ntsdk script of the ntsdk repository does, with no Docker.
 #   SDK: nt31 nt35 nt40 nt50 nt52     CPU: x86 mips alpha ppc axp64 ia64
 # It sets NTRUN_DRIVE_C (and D: for the headers that the image shares by symbolic links),
 # NTRUN_PATH, NTRUN_DLLPATH, INCLUDE, LIB, CL, CPU, OS and so on, and NTRUN to the ntrun to run.
-# NTSDK_ROOT is the folder of the ntsdk repository (default: comps/ntsdk-master of this project).
+# NTSDK_ROOT is the folder of the ntsdk repository (default: the ntsdk repository next to the folder of
+# this project, ../ntsdk).
 # Needs a native ntrun.exe (MSYS2 UCRT64, ntrun built with make) or a Unix ntrun.
 
 ntsdk_here=$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)
-NTSDK_ROOT=${NTSDK_ROOT:-$ntsdk_here/../../comps/ntsdk-master}
+NTSDK_ROOT=${NTSDK_ROOT:-$ntsdk_here/../../../ntsdk}
 
 if command -v cygpath > /dev/null 2>&1; then
     ntsdk_host() { cygpath -m "$1"; }
@@ -85,24 +86,6 @@ ntsdk_env() {
         NTRUN_PATH='C:\mstools\bin;C:\msdev\bin'
         INCLUDE='D:\;C:\msdev\include;C:\msdev\mfc\include'
         LIB='C:\mstools\lib;C:\msdev\lib;C:\msdev\mfc\lib'
-        NTRUN_DLLPATH=$t/nt40/$cpu/msdev/redist$s$t/sys/$cpu
-        ;;
-    vc6-x86 | vc6-alpha)
-        # Visual C++ 6.0 of comps/MSVC_X86 or comps/MSVC_ALPHA (the one that the C++ of the
-        # larger samples, TightVNC for example, needs)
-        NTRUN_DRIVE_C=$NTSDK_ROOT/../MSVC_$(echo "$cpu" | tr a-z A-Z)/MSVC6
-        NTRUN_PATH='C:\VC98\BIN;C:\COMMON\MSDEV98\BIN'
-        INCLUDE='C:\VC98\INCLUDE;C:\VC98\MFC\INCLUDE;C:\VC98\ATL\INCLUDE'
-        LIB='C:\VC98\LIB;C:\VC98\MFC\LIB'
-        NTRUN_DLLPATH=$t/sys/$cpu
-        ;;
-    msvc4-x86 | msvc4-mips | msvc4-alpha | msvc4-ppc)
-        # Visual C++ 4.x and the Win32 SDK of comps/MSVC_<CPU> (MSDEV, MSTOOLS): the SDK of
-        # that folder has all the headers (ws2tcpip.h), the shared ones of nt40 do not
-        NTRUN_DRIVE_C=$NTSDK_ROOT/../MSVC_$(echo "$cpu" | tr a-z A-Z)
-        NTRUN_PATH='C:\MSDEV\BIN;C:\MSTOOLS\BIN'
-        INCLUDE='C:\MSTOOLS\INCLUDE;C:\MSDEV\INCLUDE;C:\MSDEV\MFC\INCLUDE'
-        LIB='C:\MSTOOLS\LIB;C:\MSDEV\LIB;C:\MSDEV\MFC\LIB'
         NTRUN_DLLPATH=$t/nt40/$cpu/msdev/redist$s$t/sys/$cpu
         ;;
     nt50-axp64)
