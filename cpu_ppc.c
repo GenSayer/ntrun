@@ -7,6 +7,12 @@
 #include <setjmp.h>
 #include "ntrun.h"
 
+#if defined(_WIN32) && !defined(_UCRT)
+/* the fma of msvcrt.dll (MINGW64) is not exactly rounded: the multiply-add of the PowerPC is */
+#include "softfma.h"
+#define fma soft_fma
+#endif
+
 static struct {
     u32 r[32];
     u64 f[32];

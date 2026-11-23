@@ -55,9 +55,8 @@ Cygwin layer:
     pacman -S make mingw-w64-x86_64-gcc           # or in the MINGW64 shell
     make CC=gcc
 
-UCRT64 is the one to use. A MINGW64 build (it uses `msvcrt.dll`) passes all the tests but `num` and `math`
-for PowerPC: the `fma` of that C library is not exactly rounded, and the PowerPC multiply-add
-instructions use it.
+UCRT64 is the preferred one. The C library of MINGW64 (`msvcrt.dll`) has an `fma` that is not exactly rounded,
+so a MINGW64 build uses its own (`softfma.h`) for the multiply-add of the PowerPC.
 
 - The Makefile links the program statically on Windows, so that a program that ntrun starts
   does not need the DLLs of MSYS2 on its `PATH`.

@@ -8,7 +8,7 @@ LDFLAGS += -static
 endif
 SRC = ntrun.c cmd.c seh.c cpu_mips.c cpu_alpha.c cpu_ppc.c cpu_x86.c
 
-ntrun: $(SRC) ntrun.h x86args.h win32_compat.h
+ntrun: $(SRC) ntrun.h x86args.h win32_compat.h softfma.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SRC) -lm -lpthread
 
 test: ntrun
