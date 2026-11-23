@@ -60,6 +60,10 @@ so a MINGW64 build uses its own (`softfma.h`) for the multiply-add of the PowerP
 
 - The Makefile links the program statically on Windows, so that a program that ntrun starts
   does not need the DLLs of MSYS2 on its `PATH`.
+- The program has a manifest (`ntrun.manifest`, put in by `windres`) that makes it aware of paths longer than
+  259 characters. Windows uses it only when `LongPathsEnabled` is 1 in the registry
+  (`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem`); otherwise the limit of Windows stays 259.
+  A program of Windows cannot start in a folder with a path longer than 259 characters.
 - Run it from an MSYS2 shell with `MSYS2_ARG_CONV_EXCL="*"`: otherwise MSYS changes an argument
   like `/c` into a path.
 - `NTRUN_DLLPATH` has `;` between the folders on Windows (a drive letter has `:`).

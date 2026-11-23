@@ -34,6 +34,11 @@
 
 #include "ntrun.h"
 
+#ifdef _WIN32
+/* win32_compat.h gives 4096: the limits.h of mingw has 260, too small for the host paths */
+_Static_assert(PATH_MAX >= 4096, "PATH_MAX is too small for host paths");
+#endif
+
 static u32 errorlevel;
 static int echo_on = 1;
 static int abort_line; /* a GOTO or the end of the batch file: leave the rest of the line */

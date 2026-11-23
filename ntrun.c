@@ -32,6 +32,11 @@
 #endif
 #include "ntrun.h"
 
+#ifdef _WIN32
+/* win32_compat.h gives 4096: the limits.h of mingw has 260, too small for the host paths */
+_Static_assert(PATH_MAX >= 4096, "PATH_MAX is too small for host paths");
+#endif
+
 #ifndef _WIN32
 extern char **environ;
 #endif
