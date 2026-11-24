@@ -57,10 +57,12 @@ static u32 cmdline_g;
 
 #define GSIZE 0x80000000ull
 #ifdef _WIN32
+#define DLLPATH_SEP ";"
 #define HOST_DRIVE_PATH(h) (isalpha((unsigned char)(h)[0]) && (h)[1] == ':')
 #define HOST_NULL "NUL"
 #define HOST_TTY "CON"
 #else
+#define DLLPATH_SEP ":"
 #define HOST_DRIVE_PATH(h) 0
 #define HOST_NULL "/dev/null"
 #define HOST_TTY "/dev/tty"
@@ -1784,9 +1786,25 @@ API(GetOEMCP) { UNUSED; return 437; }
 API(IsValidCodePage) { return a[0] == 1252 || a[0] == 437; }
 API(IsValidLocale) { UNUSED; return 1; }
 API(GetUserDefaultLCID) { UNUSED; return 0x409; }
-API(IsBadReadPtr) { return a[0] < 0x10000 || (u64)a[0] + a[1] > GSIZE; }
-API(IsBadWritePtr) { return a[0] < 0x10000 || (u64)a[0] + a[1] > GSIZE; }
-API(IsBadCodePtr) { return a[0] < 0x10000 || a[0] >= GSIZE; }
+/* Is the memory from ADDR for LEN bytes the program's? Everywhere else the host gives each address from
+   0x10000 to 2 GB. On a Windows host only the regions that the program got are there: the rest faults. */
+static int guest_ok(u32 addr, u32 len)
+{
+    u64 end = (u64)addr + len;
+
+    if (addr < 0x10000 || end > GSIZE)
+        return 0;
+#ifdef _WIN32
+    for (u32 c = addr / CHUNK; c <= (u32)((end - (len ? 1 : 0)) / CHUNK); c++)
+        if (c >= NCHUNK || rmap[c] != 1)
+            return 0;
+#endif
+    return 1;
+}
+
+API(IsBadReadPtr) { return !guest_ok(a[0], a[1]); }
+API(IsBadWritePtr) { return !guest_ok(a[0], a[1]); }
+API(IsBadCodePtr) { return !guest_ok(a[0], 1); }
 
 /* ExitProcess tells each DLL that the program ends (reason 0), the DLL that started last first.
    The C runtime DLL of 2005 writes the rest of the output of the program at that time. */
@@ -2190,6 +2208,8 @@ API(WriteFile)
 {
     int fd = hfd(a[0]);
     u32 done = 0;
+
+    views_sync_fd(fd);
 
     if (a[3])
         w32(a[3], 0);
@@ -3191,7 +3211,7 @@ static void views_sync_fd(int fd)
 {
     u64 vol, idx;
 
-    if (!nviews || !file_number(fd, &vol, &idx))
+    if (fd < 0 || !nviews || !file_number(fd, &vol, &idx))
         return;
     for (int i = 0; i < nviews; i++)
         if (views[i].copy && views[i].vol == vol && views[i].idx == idx)
@@ -3201,11 +3221,14 @@ static void views_sync_fd(int fd)
 /* map the file of FD at the guest address ADDR (regions of 64 KB that region_alloc gave) */
 static int map_view(int fd, u32 addr, u32 len, u32 off)
 {
-    HANDLE sec = CreateFileMappingA((HANDLE)_get_osfhandle(fd), NULL, PAGE_READWRITE, 0, 0, NULL);
+    HANDLE sec;
     u32 n = (len + CHUNK - 1) / CHUNK;
     void *p;
 
-    if (!sec || (off & (CHUNK - 1)))
+    if (off & (CHUNK - 1)) /* a view starts at a multiple of 64 KB */
+        return 0;
+    sec = CreateFileMappingA((HANDLE)_get_osfhandle(fd), NULL, PAGE_READWRITE, 0, 0, NULL);
+    if (!sec)
         return 0;
     for (u32 k = 0; k < n; k++)
         VirtualFree(G + addr + (size_t)k * CHUNK, 0, MEM_RELEASE); /* the places are free now */
@@ -4205,7 +4228,7 @@ API(CharLowerA)
 }
 API(CharUpperBuffA) { for (u32 i = 0; i < a[1]; i++) w8(a[0] + i, (u8)mapchar(r8(a[0] + i), 0x200)); return a[1]; }
 API(CharLowerBuffA) { for (u32 i = 0; i < a[1]; i++) w8(a[0] + i, (u8)mapchar(r8(a[0] + i), 0x100)); return a[1]; }
-API(IsBadStringPtrA) { return a[0] < 0x10000 || a[0] >= GSIZE; }
+API(IsBadStringPtrA) { return !guest_ok(a[0], 1); }
 API(OutputDebugStringA) { UNUSED; return 0; }
 API(SendMessageW) { UNUSED; return 0; }
 API(GlobalLock) { return a[0]; }
@@ -6473,7 +6496,7 @@ int main(int argc, char **argv)
             "  program: a file (tools/CL.EXE), or a name (cl) to find in the folders of NTRUN_PATH\n"
             "  -a  print each Win32 call (-a -a: also before the call)   -t  print each instruction\n"
             "  NTRUN_PATH     the PATH of the program: Windows folders with ; between them\n"
-            "  NTRUN_DLLPATH  host folders with DLLs, with : between them\n");
+            "  NTRUN_DLLPATH  host folders with DLLs, with " DLLPATH_SEP " between them\n");
         return 2;
     }
 #ifdef __APPLE__

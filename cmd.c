@@ -1610,7 +1610,13 @@ static u32 run_pipeline(char *s)
     if (!bar)
         return run_command(s);
     *bar = 0;
+#ifdef _WIN32
+    /* Not inherited: the first command must not hold the read end of its own pipe (it would wait for
+       a second command that has stopped reading). dup2 makes the copies on 0 and 1 inheritable. */
+    if (_pipe(fd, 65536, _O_BINARY | _O_NOINHERIT) < 0)
+#else
     if (pipe(fd) < 0)
+#endif
         return 1;
     fflush(stdout);
     fflush(stderr);
