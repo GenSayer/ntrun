@@ -50,11 +50,17 @@ run_limited() {
     rm -f "$flag"
     "$@" &
     p=$!
-    ( sleep "$t"; if kill -0 "$p" 2> /dev/null; then : > "$flag"; kill "$p" 2> /dev/null; fi ) > /dev/null 2>&1 &
+    # the watch ends by itself soon after the command (it is not killed: a shell would report it)
+    ( i=0
+      while [ "$i" -lt "$t" ] && kill -0 "$p" 2> /dev/null; do
+          sleep 1
+          i=$((i + 1))
+      done
+      if kill -0 "$p" 2> /dev/null; then : > "$flag"; kill "$p" 2> /dev/null; fi ) > /dev/null 2>&1 &
     k=$!
     wait "$p"
     r=$?
-    kill "$k" 2> /dev/null
+    wait "$k" 2> /dev/null
     if [ -f "$flag" ]; then
         rm -f "$flag"
         echo "stopped: it did not end in $t seconds"
