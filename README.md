@@ -155,7 +155,8 @@ exceptions (`seh`, `jmpex`, `eh`), thread-local data (`tls`), threads (`thread`)
 arithmetic (`num`, `fpx`), the math functions of the C library (`math`), the x87 (`x87`, for x86 only),
 the MD5 and SHA-1 sums of the system (`hash`, against the values that `md5` and `shasum` give),
 the tools (`tools`: mc, rc, lib, a DLL), a pipe from a child process (`popen`: `_popen` and the pipe of `CreatePipe`),
-file views that agree with the file (`mapview`) and the command processor (`cmdtest.bat`, `drive`).
+file views that agree with the file (`mapview`) and the command processor (`cmdtest.bat`, `drive`, and `pipe`:
+a pipeline whose second command ends without reading must not hang).
 `axp64` builds a C++ program, a DLL and a program with resources with the tools for 64-bit Alpha
 (`nt50/axp64` of TOOLS) and reads the headers of the files: ntrun cannot run them.
 `ia64` does the same with the cross compiler for Itanium (`nt52/ia64` of TOOLS).

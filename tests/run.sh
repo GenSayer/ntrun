@@ -41,6 +41,28 @@ fail=0
 total=0
 
 
+# run_limited SECONDS COMMAND...: the command is stopped after that time (macOS has no timeout(1)).
+# A command that had to be stopped writes a line about it to its own output, so that its test fails.
+run_limited() {
+    t=$1
+    shift
+    flag=run_limited.stopped
+    rm -f "$flag"
+    "$@" &
+    p=$!
+    ( sleep "$t"; if kill -0 "$p" 2> /dev/null; then : > "$flag"; kill "$p" 2> /dev/null; fi ) > /dev/null 2>&1 &
+    k=$!
+    wait "$p"
+    r=$?
+    kill "$k" 2> /dev/null
+    if [ -f "$flag" ]; then
+        rm -f "$flag"
+        echo "stopped: it did not end in $t seconds"
+        return 1
+    fi
+    return $r
+}
+
 check() { # check NAME CPU: compare NAME.txt with the expected output
     exp=$here/$1.out
     [ -f "$here/$1.out.$2" ] && exp=$here/$1.out.$2
@@ -66,6 +88,11 @@ check cmdtest cmd
 # a drive letter for a host folder
 NTRUN_DRIVE_Q=$d $ntrun cmd /c "cd& if exist q:\\cmdtest.bat echo found& md sub& cd sub& cd& cd ..& rd sub" > drive.txt 2>&1
 check drive cmd
+# a pipeline whose second command ends without reading, with a first command that writes 139264 bytes:
+# it must end (a first command that holds its own pipe waits for ever)
+cp "$here"/pipe.bat "$d"/
+run_limited ${PIPE_LIMIT:-60} $ntrun cmd /c pipe.bat > pipe.txt 2>&1
+check pipe cmd
 
 for cpu in "$@"; do
     echo "== $cpu"
